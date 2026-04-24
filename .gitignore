@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.log
+debug.log
+bot.log
+sessions.json
+messages.json
+history_*.json
+.gateway.pid
+config.json
