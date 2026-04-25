@@ -20,6 +20,8 @@ from urllib.parse import urlencode
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, FormData
 
+from shared import VKClient, load_config
+
 
 # ---------- Управление процессом OpenCode ----------
 class OpenCodeProcess:
@@ -89,41 +91,6 @@ class OpenCodeProcess:
 
 
 # ---------- Загрузка конфигурации ----------
-def load_config(config_path: str = "config.json") -> dict:
-    """Загружает конфигурацию из JSON-файла."""
-    default_config = {
-        "vk_token": "token",
-        "opencode_url": "http://127.0.0.1:4096",
-        "session_file": "sessions.json",
-        "vk_api_version": "5.200",
-        "longpoll_wait": 25,
-        "thinking_peer_id": 2000000506,
-        "model": "llama.cpp/qwen3.5-122b",
-        "llama_server_path": "llama-server",
-        "models": [],
-        "default_model": "qwen3.5-122b",
-    }
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            user_config = json.load(f)
-        config = {**default_config, **user_config}
-    except FileNotFoundError:
-        print(f"Config file {config_path} not found, using defaults.")
-        config = default_config
-    except json.JSONDecodeError as e:
-        print(f"Error parsing config file {config_path}: {e}")
-        raise
-    return config
-
-
-def get_model_by_alias(alias: str) -> dict | None:
-    """Получает модель по алиасу."""
-    return MODELS.get(alias) if isinstance(MODELS, dict) else None
-
-
-def get_current_model() -> dict | None:
-    """Получает текущую модель по default_model."""
-    return get_model_by_alias(DEFAULT_MODEL) if DEFAULT_MODEL else None
 
 
 async def restart_llama_server(model: dict, alias: str = None) -> bool:
@@ -244,7 +211,11 @@ parser.add_argument(
 parser.add_argument(
     "-d", "--debug", action="store_true", help="Enable debug logging to file"
 )
-args = parser.parse_args()
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+else:
+    args = parser.parse_args(["--config", "config.json"])
 
 CONFIG = load_config(args.config)
 
