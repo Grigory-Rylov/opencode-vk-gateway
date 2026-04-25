@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 VK File Uploader
-Отправляет файл в指定анный чат ВК (peer_id)
+Отправляет файл в указанный чат ВК (peer_id)
 """
 
 import argparse
