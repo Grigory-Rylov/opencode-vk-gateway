@@ -114,7 +114,7 @@ async def restart_llama_server(model: dict, alias: str = None) -> bool:
     # Запускаем напрямую (без tmux)
     llama_path = LLAMA_SERVER_PATH
     args = model.get("args", "")
-    cmd = f"{llama_path} {args}"
+    cmd = f"{llama_path} --parallel 2 {args}"
     
     try:
         # Убираем переменную TMUX чтобы запустить нормально
