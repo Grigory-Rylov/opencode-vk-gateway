@@ -534,8 +534,8 @@ class VKLongPoll:
         user_id = peer_id
         logger.info(f"New message from {user_id}: text='{text}'")
 
-        if text.strip() == "/update":
-            logger.debug("Ignoring /update command (handled by reloader)")
+        if text.strip() in ("/update", "/start"):
+            logger.debug("Ignoring /start or /update command (handled by reloader)")
             return
 
         if text.strip().startswith("/restart"):
