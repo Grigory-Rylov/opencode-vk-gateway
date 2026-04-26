@@ -236,8 +236,9 @@ class VKLongPollReloader:
         logger.info(f"New message from {peer_id}: '{text}'")
 
         # Проверяем команду /update
-        if text.strip().lower() == "/update":
-            logger.info("Received /update command")
+        command = text.strip().lower()
+        if command in ("/update", "/start"):
+            logger.info(f"Received {command} command")
             try:
                 await self.vk.send_message(peer_id, "🔄 Перезагрузка opencode-vk-gateway.py...")
                 success = restart_gateway()
