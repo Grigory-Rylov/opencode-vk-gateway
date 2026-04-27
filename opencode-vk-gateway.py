@@ -93,6 +93,21 @@ class OpenCodeProcess:
 # ---------- Загрузка конфигурации ----------
 
 
+def get_current_model():
+    """Возвращает первую модель из конфига."""
+    models = CONFIG.get("models", {})
+    if not models:
+        return None
+    first_key = next(iter(models))
+    return models[first_key]
+
+
+def get_model_by_alias(alias: str):
+    """Возвращает модель по алиасу из конфига."""
+    models = CONFIG.get("models", {})
+    return models.get(alias)
+
+
 async def restart_llama_server(model: dict, alias: str = None) -> bool:
     """Перезапускает llama server с указанной моделью."""
     import subprocess
@@ -226,7 +241,7 @@ VK_API_VERSION = CONFIG["vk_api_version"]
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
 THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
 MODEL = CONFIG.get("model")
-MODELS = CONFIG.get("models", [])
+MODELS = CONFIG.get("models", {})
 DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", "llama-server")
 
