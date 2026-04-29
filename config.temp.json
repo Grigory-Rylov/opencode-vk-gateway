@@ -1,8 +1,0 @@
-{
-  "vk_token": "vk1.a.",
-  "opencode_url": "http://127.0.0.1:4096",
-  "session_file": "sessions.json",
-  "vk_api_version": "5.200",
-  "longpoll_wait": 25,
-  "thinking_peer_id": 2000000001
-}

@@ -34,38 +34,47 @@ class OpenCodeProcess:
         self.logger.debug(f"OpenCodeProcess initialized: workdir={self.workdir}, cwd={Path.cwd()}")
 
     async def start(self):
-        self.logger.info(f"Starting opencode serve: workdir={self.workdir}, cwd={Path.cwd()}")
-        self.logger.debug(f"opencode serve command: {OPENCODE_BIN} serve --port {self.opencode_port}")
+        workdir_str = str(self.workdir)
+        self.logger.info(f"Starting opencode serve in {workdir_str}")
         
-        try:
-            def is_port_in_use(port):
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    return s.connect_ex(('127.0.0.1', port)) == 0
-            
-            if is_port_in_use(self.opencode_port):
-                self.logger.info(f"opencode serve already running on port {self.opencode_port}, killing...")
-                subprocess.run(["pkill", "-f", f'{OPENCODE_BIN} serve'], capture_output=True)
-                await asyncio.sleep(2)
-            
-            subprocess.run(["pkill", "-f", f'{OPENCODE_BIN} serve'], capture_output=True)
-            await asyncio.sleep(1)
-        except Exception as e:
-            self.logger.warning(f"Error killing existing process: {e}")
+        # убиваем старые процессы и ждём освобождения порта
+        subprocess.run(["pkill", "-9", "-f", f'{OPENCODE_BIN} serve'], stderr=subprocess.DEVNULL)
+        for _ in range(10):
+            result = subprocess.run(["lsof", "-i", f":{self.opencode_port}"], capture_output=True)
+            if result.returncode != 0:
+                break
+            await asyncio.sleep(0.5)
         
-        try:
-            self.process = subprocess.Popen(
-                [OPENCODE_BIN, "serve", "--port", str(self.opencode_port)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(self.workdir),
-            )
-            self.logger.debug(f"opencode serve subprocess created: pid={self.process.pid}")
-        except Exception as e:
-            self.logger.error(f"Failed to start opencode: {e}")
-            return
+        # Логирование в файл для отладки
+        log_file = open(f"/tmp/opencode_{self.opencode_port}.log", "w")
         
-        await asyncio.sleep(2)
-        self.logger.info(f"opencode serve started, pid={self.process.pid}, model={self.model}, workdir={self.workdir}")
+        self.process = subprocess.Popen(
+            [OPENCODE_BIN, "serve", "--port", str(self.opencode_port)],
+            stdout=log_file,
+            stderr=log_file,
+            cwd=workdir_str,
+            start_new_session=True,
+        )
+        self.logger.info(f"Started with PID {self.process.pid}, log file: {log_file.name}")
+        
+        # ждём, пока процесс не упадёт или порт не начнёт отвечать
+        for _ in range(30):  # 15 секунд
+            if self.process.poll() is not None:
+                log_file.close()
+                stdout, stderr = self.process.communicate()
+                stderr_str = stderr.decode() if stderr else "no stderr available"
+                raise RuntimeError(f"opencode exited early: {stderr_str}")
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get("http://127.0.0.1:4096/", timeout=1) as resp:
+                        if resp.status == 200:
+                            self.logger.info("OpenCode server is ready")
+                            return
+            except:
+                pass
+            await asyncio.sleep(0.5)
+        log_file.close()
+        raise TimeoutError("OpenCode server did not become ready in time")
 
     async def restart(self, workdir: Path = None):
         if workdir:
@@ -93,22 +102,7 @@ class OpenCodeProcess:
 # ---------- Загрузка конфигурации ----------
 
 
-def get_current_model():
-    """Возвращает первую модель из конфига."""
-    models = CONFIG.get("models", {})
-    if not models:
-        return None
-    first_key = next(iter(models))
-    return models[first_key]
-
-
-def get_model_by_alias(alias: str):
-    """Возвращает модель по алиасу из конфига."""
-    models = CONFIG.get("models", {})
-    return models.get(alias)
-
-
-async def restart_llama_server(model: dict, alias: str = None) -> bool:
+async def restart_llama_server(model: dict, alias: str = None, llama_path: str = None) -> bool:
     """Перезапускает llama server с указанной моделью."""
     import subprocess
     import shlex
@@ -127,9 +121,9 @@ async def restart_llama_server(model: dict, alias: str = None) -> bool:
         logger.warning(f"Failed to kill llama server: {e}")
     
     # Запускаем напрямую (без tmux)
-    llama_path = LLAMA_SERVER_PATH
+    path = llama_path or LLAMA_SERVER_PATH
     args = model.get("args", "")
-    cmd = f"{llama_path} --parallel 2 {args}"
+    cmd = f"{path} {args}"
     
     try:
         # Убираем переменную TMUX чтобы запустить нормально
@@ -241,7 +235,7 @@ VK_API_VERSION = CONFIG["vk_api_version"]
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
 THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
 MODEL = CONFIG.get("model")
-MODELS = CONFIG.get("models", {})
+MODELS = CONFIG.get("models", [])
 DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", "llama-server")
 
@@ -320,6 +314,21 @@ else:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 logger = logging.getLogger("vk-opencode")
+
+
+def get_current_model():
+    """Возвращает текущую модель из конфига."""
+    if not MODELS:
+        return None
+    first_key = next(iter(MODELS))
+    return MODELS[first_key]
+
+
+def get_model_by_alias(alias: str):
+    """Возвращает модель по алиасу."""
+    if not MODELS:
+        return None
+    return MODELS.get(alias)
 
 
 # ---------- Управление сессиями OpenCode ----------
@@ -549,8 +558,8 @@ class VKLongPoll:
         user_id = peer_id
         logger.info(f"New message from {user_id}: text='{text}'")
 
-        if text.strip() in ("/update", "/start"):
-            logger.debug("Ignoring /start or /update command (handled by reloader)")
+        if text.strip() == "/update":
+            logger.debug("Ignoring /update command (handled by reloader)")
             return
 
         if text.strip().startswith("/restart"):
@@ -596,6 +605,15 @@ class VKLongPoll:
 
         if text.strip() == "/sessions":
             await self._send_sessions(user_id)
+            return
+
+        if text.strip() == "/clearsessions":
+            session_file = SCRIPT_DIR / self.config.get("session_file", "sessions.json")
+            if session_file.exists():
+                session_file.unlink()
+                await self.vk.send_message(user_id, "✅ Сессии удалены")
+            else:
+                await self.vk.send_message(user_id, "ℹ️ Файл sessions.json не найден")
             return
 
         if text.strip().startswith("/logs"):
@@ -698,34 +716,77 @@ class VKLongPoll:
             await self.vk.send_message(user_id, f"❌ Ошибка отправки истории: {e}")
 
     async def _new_session(self, user_id: int, workdir_path: str = None):
-        logger.info(f"_new_session: user_id={user_id}, workdir_path={workdir_path}, current workdir={self.opencode_process.workdir}")
+        logger.info(f"=== _new_session START ===")
+        logger.info(f"user_id={user_id}")
+        logger.info(f"workdir_path={workdir_path}")
+        
         try:
             self.session_mgr.remove(user_id)
             
             if workdir_path:
                 workdir = Path(workdir_path)
                 if not workdir.exists():
+                    logger.info(f"Creating workdir: {workdir}")
                     workdir.mkdir(parents=True, exist_ok=True)
-                    logger.info(f"Created workdir: {workdir}")
             else:
                 workdir = Path.cwd()
             
-            logger.info(f"_new_session: restarting opencode with workdir={workdir}, cwd={Path.cwd()}")
+            logger.info(f"workdir: {workdir}, exists: {workdir.exists()}")
+            
+            # Инициализируем opencode в этой папке (даже если .opencode уже есть, переинициализация не повредит)
+            try:
+                init_result = subprocess.run(
+                    [OPENCODE_BIN, "init"],
+                    cwd=str(workdir),
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                logger.info(f"opencode init: returncode={init_result.returncode}")
+                if init_result.returncode != 0:
+                    logger.warning(f"opencode init stdout: {init_result.stdout}")
+                    logger.warning(f"opencode init stderr: {init_result.stderr}")
+            except Exception as e:
+                logger.warning(f"opencode init warning: {e}")
+            
+            # Перезапускаем сервер с новым workdir
+            logger.info(f"Calling restart with workdir={workdir}")
             await self.opencode_process.restart(workdir)
             
+            # Дополнительная проверка готовности (на случай, если restart не выбросил исключение)
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    for _ in range(10):
+                        try:
+                            async with sess.get("http://localhost:4096/", timeout=1) as resp:
+                                if resp.status == 200:
+                                    break
+                        except:
+                            pass
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise Exception("Server not responding after restart")
+            except Exception as e:
+                await self.vk.send_message(user_id, f"❌ Сервер OpenCode не запустился: {e}")
+                return
+            
+            # Создаём новую сессию через API
             async with ClientSession() as session:
                 data = {"model": MODEL} if MODEL else {}
                 async with session.post(f"{OPENCODE_URL}/session", json=data) as resp:
-                    resp.raise_for_status()
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise Exception(f"HTTP {resp.status}: {text}")
                     resp_data = await resp.json()
                     new_session_id = resp_data["id"]
                     self.session_mgr.sessions[user_id] = new_session_id
                     self.session_mgr._save()
-
-            await self.vk.send_message(
-                user_id, f"✅ Создана новая сессия: {new_session_id} (model={MODEL}, workdir={self.opencode_process.workdir})"
-            )
-            logger.info(f"New session {new_session_id} created for user {user_id} with model {MODEL} in {self.opencode_process.workdir}")
+            
+            logger.info(f"=== _new_session END ===")
+            logger.info(f"new_session_id={new_session_id}")
+            logger.info(f"final workdir={self.opencode_process.workdir}")
+            
+            await self.vk.send_message(user_id, f"✅ Новая сессия: {new_session_id}\nРабочая папка: {workdir}")
         except Exception as e:
             logger.exception(f"Error creating new session: {e}")
             await self.vk.send_message(user_id, f"❌ Ошибка создания сессии: {e}")
@@ -746,6 +807,7 @@ class VKLongPoll:
 /history <session_id> - Получить историю конкретной сессии
 /logs - Отправить файл логов
 /sessions - Показать список всех сессий
+/clearsessions - Удалить все сессии
 /models - Показать доступные модели
 /newsession - Создать новую сессию
 /help - Показать эту справку
@@ -796,6 +858,25 @@ class VKLongPoll:
                         await self.vk.send_message(user_id, final_text)
                     else:
                         await self._send_final_message(user_id, session_id)
+                    break
+                elif event_type == "session.error":
+                    props = event.get("properties", {})
+                    error = props.get("error", {})
+                    error_name = error.get("name", "UnknownError")
+                    error_data = error.get("data", {})
+                    error_message = error_data.get("message", str(error))
+                    logger.error(f"Session error: {error_name} - {error_message}")
+                    if "null bytes" in error_message.lower():
+                        await self.vk.send_message(
+                            user_id, 
+                            "❌ Ошибка OpenCode: повреждён кеш snapshot.\n"
+                            "Выполните в терминале: `rm -rf ~/.local/share/opencode/snapshot/` и попробуйте снова."
+                        )
+                    else:
+                        await self.vk.send_message(
+                            user_id, 
+                            f"❌ Ошибка сессии: {error_name}\n{error_message[:200]}"
+                        )
                     break
                 elif event_type == "message.part.updated":
                     part = event.get("properties", {}).get("part", {})
@@ -974,9 +1055,12 @@ class VKLongPoll:
             async with session.get(url) as resp:
                 if resp.status != 200:
                     logger.error(f"Failed to get messages: {resp.status}")
+                    await self.vk.send_message(user_id, "❌ Ошибка получения ответа")
                     return
                 messages = await resp.json()
                 if not messages:
+                    logger.warning("No messages found in session")
+                    await self.vk.send_message(user_id, "⚠️ Нет ответа от opencode")
                     return
                 assistant_msg = None
                 for msg in reversed(messages):
@@ -985,6 +1069,7 @@ class VKLongPoll:
                         break
                 if not assistant_msg:
                     logger.warning("No assistant message found")
+                    await self.vk.send_message(user_id, "⚠️ Нет ответа от opencode")
                     return
                 text = ""
                 for part in assistant_msg.get("parts", []):
@@ -992,6 +1077,9 @@ class VKLongPoll:
                         text += part.get("text", "")
                 if text:
                     await self.vk.send_message(user_id, text)
+                else:
+                    logger.warning("Assistant message has no text content")
+                    await self.vk.send_message(user_id, "⚠️ Пустой ответ от opencode")
 
     async def run(self):
         self.running = True

@@ -38,8 +38,15 @@ logger = logging.getLogger("vk-reloader")
 
 # Путь к основному скрипту
 SCRIPT_DIR = Path(__file__).parent.resolve()
-MAIN_SCRIPT = SCRIPT_DIR / "opencode-vk-gateway.py"
+MAIN_SCRIPT = SCRIPT_DIR / "v0.py"
 PID_FILE = SCRIPT_DIR / ".gateway.pid"
+
+# Пути к версиям скрипта для запуска (приоритет: v1 -> v0 -> корень)
+SCRIPT_VERSIONS = [
+    SCRIPT_DIR / "v1.py",
+    SCRIPT_DIR / "v0.py",
+    MAIN_SCRIPT,
+]
 
 # Загрузка токена из config.json
 def load_config() -> tuple[str, int]:
@@ -130,10 +137,17 @@ def is_process_running(pid: int) -> bool:
         return False
 
 
-def restart_gateway():
-    """Перезапускает основной скрипт opencode-vk-gateway.py."""
+def restart_gateway(version: str = None):
+    """Перезапускает основной скрипт opencode-vk-gateway.py.
+    
+    Args:
+        version: Версия для запуска - "default", "v0", "v1". Если None - автовыбор по приоритету.
+    
+    Returns:
+        tuple: (success: bool, started_from: str | None)
+    """
     logger.info("=== Restarting opencode-vk-gateway.py ===")
-    logger.info(f"restart_gateway: SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}")
+    logger.info(f"restart_gateway: SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}, version={version}")
 
     # Проверяем PID файл
     old_pid = get_gateway_pid()
@@ -158,35 +172,62 @@ def restart_gateway():
         except Exception as e:
             logger.warning(f"Failed to remove debug.log: {e}")
 
-    # Запускаем новый процесс
-    logger.info(f"Starting new process: {MAIN_SCRIPT}")
-    logger.info(f"subprocess.Popen cwd will be: {SCRIPT_DIR}")
+    # Определяем какие версии пробовать
+    if version:
+        version = version.lower()
+        if version == "default":
+            scripts_to_try = [MAIN_SCRIPT]
+        elif version == "v0":
+            # Для /update v0 запускаем v0.py из текущего каталога
+            scripts_to_try = [SCRIPT_DIR / "v0.py"]
+        elif version == "v1":
+            # Для /update v1 или /start v1: v1.py -> v0.py -> opencode-vk-gateway.py
+            scripts_to_try = [SCRIPT_DIR / "v1.py", SCRIPT_DIR / "v0.py", MAIN_SCRIPT]
+        else:
+            logger.warning(f"Unknown version '{version}', using auto-select")
+            scripts_to_try = SCRIPT_VERSIONS
+    else:
+        # Автовыбор: v1.py -> v0.py -> opencode-vk-gateway.py
+        scripts_to_try = SCRIPT_VERSIONS
     
+    logger.info(f"Scripts to try: {[str(p.relative_to(SCRIPT_DIR)) for p in scripts_to_try]}")
+
+    # Запускаем новый процесс
+    venv_python = SCRIPT_DIR / "venv/bin/python"
     log_file = SCRIPT_DIR / "debug.log"
-    try:
-        venv_python = SCRIPT_DIR / "venv/bin/python"
-        stdout_file = open(log_file, "w")
-        proc = subprocess.Popen(
-            [str(venv_python), str(MAIN_SCRIPT), "-d"],
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-            cwd=str(SCRIPT_DIR),
-        )
-        save_gateway_pid(proc.pid)
-        logger.info(f"Successfully started opencode-vk-gateway.py (PID: {proc.pid})")
+    stdout_file = open(log_file, "w")
+    
+    for script_path in scripts_to_try:
+        logger.info(f"Trying to start from: {script_path}")
+        if not script_path.exists():
+            logger.info(f"Script not found: {script_path}, skipping")
+            continue
+        
+        try:
+            proc = subprocess.Popen(
+                [str(venv_python), str(script_path), "-d"],
+                stdout=stdout_file,
+                stderr=subprocess.STDOUT,
+                cwd=str(SCRIPT_DIR),
+            )
+            save_gateway_pid(proc.pid)
+            started_from = str(script_path.relative_to(SCRIPT_DIR))
+            logger.info(f"Successfully started opencode-vk-gateway.py from {started_from} (PID: {proc.pid})")
 
-        # Даем процессу время запуститься
-        time.sleep(3)
+            time.sleep(3)
 
-        if not is_process_running(proc.pid):
-            logger.error("New process exited immediately!")
+            if not is_process_running(proc.pid):
+                logger.error(f"Process from {script_path} exited immediately!")
+                continue
+            
             stdout_file.close()
-            return False
-        stdout_file.close()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to start opencode-vk-gateway.py: {e}")
-        return False
+            return True, started_from
+        except Exception as e:
+            logger.error(f"Failed to start from {script_path}: {e}")
+    
+    stdout_file.close()
+    logger.error("All script versions failed to start!")
+    return False, None
 
 
 class VKLongPollReloader:
@@ -235,23 +276,44 @@ class VKLongPollReloader:
 
         logger.info(f"New message from {peer_id}: '{text}'")
 
-        # Проверяем команду /update
-        command = text.strip().lower()
+        # Проверяем команду /update /start
+        parts = text.strip().split()
+        command = parts[0].lower() if parts else ""
+        
         if command in ("/update", "/start"):
-            logger.info(f"Received {command} command")
+            version = parts[1] if len(parts) > 1 else None
+            logger.info(f"Received {command} command, version={version}")
             try:
-                await self.vk.send_message(peer_id, "🔄 Перезагрузка opencode-vk-gateway.py...")
-                success = restart_gateway()
+                version_text = f" (версия: {version})" if version else " (автовыбор)"
+                await self.vk.send_message(peer_id, f"🔄 Перезагрузка opencode-vk-gateway.py{version_text}...")
+                success, started_from = restart_gateway(version)
                 if success:
-                    await self.vk.send_message(peer_id, "✅ opencode-vk-gateway.py перезапущен")
+                    from_text = f"\n📁 Запущен из: `{started_from}`"
+                    await self.vk.send_message(peer_id, f"✅ opencode-vk-gateway.py перезапущен{version_text}{from_text}")
                 else:
-                    await self.vk.send_message(peer_id, "❌ Не удалось перезапустить opencode-vk-gateway.py")
+                    await self.vk.send_message(peer_id, f"❌ Не удалось перезапустить opencode-vk-gateway.py{version_text}")
             except Exception as e:
-                logger.error(f"Error handling /update: {e}")
+                logger.error(f"Error handling {command}: {e}")
                 try:
                     await self.vk.send_message(peer_id, f"❌ Ошибка: {e}")
                 except:
                     pass
+        elif command == "/restart-help":
+            help_text = """
+🔄 Команды перезапуска:
+
+/start - Автовыбор (v1.py → v0.py → opencode-vk-gateway.py)
+/start default - Запуск opencode-vk-gateway.py
+/start v0 - Запуск v0.py из текущего каталога
+/start v1 - Запуск v1.py (если нет → v0.py → opencode-vk-gateway.py)
+
+/update - То же что /start
+/update default|v0|v1 - Запуск конкретной версии
+"""
+            try:
+                await self.vk.send_message(peer_id, help_text)
+            except:
+                pass
         else:
             logger.debug(f"Ignoring message (not /update): '{text}'")
 
@@ -294,10 +356,14 @@ async def main():
     logger.info(f"Script directory: {SCRIPT_DIR}")
     logger.info(f"Main script: {MAIN_SCRIPT}")
     logger.info(f"Current working directory: {Path.cwd()}")
+    logger.info(f"Script versions to try: {[str(p.relative_to(SCRIPT_DIR)) for p in SCRIPT_VERSIONS]}")
 
-    if not MAIN_SCRIPT.exists():
-        logger.error(f"Main script not found: {MAIN_SCRIPT}")
+    # Проверяем что хотя бы одна версия скрипта существует
+    available = [p for p in SCRIPT_VERSIONS if p.exists()]
+    if not available:
+        logger.error("No opencode_vk_gateway.py found in any version directory!")
         return
+    logger.info(f"Available scripts: {[str(p.relative_to(SCRIPT_DIR)) for p in available]}")
 
     try:
         token, notify_peer_id = load_config()
