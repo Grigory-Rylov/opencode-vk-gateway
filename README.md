@@ -6,7 +6,7 @@ VK-бот для работы с [OpenCode](https://opencode.ai) - AI-ассис
 
 - Взаимодействие с OpenCode через VK-мессенджер
 - Управление несколькими моделями Llama.cpp
-- Поддержка сессий с историей对话
+- Поддержка сессий с историей
 - Отправка промежуточных рассуждений (reasoning) в отдельный чат
 - Перезапуск моделей и opencode serve без перезапуска бота
 
@@ -52,6 +52,46 @@ cp config.json.example config.json
 - `models` - доступные модели и их параметры запуска
 - `default_model` - модель по умолчанию
 - `thinking_peer_id` - ID чата для отправки промежуточных рассуждений
+
+## Принцип работы
+
+### Подмена конфига OpenCode
+
+OpenCode требует настройку провайдера для подключения к локальному llama-server. При старте бота и при переключении модели происходит автоматическое обновление конфига `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "llama.cpp/название-модели",
+  "provider": {
+    "llama.cpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-server (local)",
+      "options": {
+        "baseURL": "http://localhost:8081/v1"
+      },
+      "models": {
+        "название-модели": {
+          "name": "название-модели (local)",
+          "limit": {
+            "context": 131072,
+            "output": 65536
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Переключение моделей
+
+Команда `/restart` выполняет:
+1. Остановка текущего llama-server
+2. Запуск llama-server с новой моделью
+3. Обновление конфига OpenCode (подмена provider с новой моделью)
+4. Ожидание загрузки модели (до 5 минут)
+5. Перезапуск opencode serve для применения нового конфига
 
 ## Запуск
 

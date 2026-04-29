@@ -169,6 +169,37 @@ async def do_restart(self, user_id: int, model_alias: str = None):
         await self.vk.send_message(user_id, "⚠️ Не удалось запустить llama server")
         logger.warning("Failed to restart llama server")
     
+    # Обновляем конфиг opencode с провайдером
+    try:
+        opencode_config_path = Path.home() / ".config/opencode/opencode.json"
+        opencode_config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": model.get("model", ""),
+            "provider": {
+                "llama.cpp": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "llama-server (local)",
+                    "options": {
+                        "baseURL": "http://localhost:8081/v1"
+                    },
+                    "models": {
+                        alias: {
+                            "name": f"{alias} (local)",
+                            "limit": {
+                                "context": 131072,
+                                "output": 65536
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        with open(opencode_config_path, "w") as f:
+            json.dump(opencode_config, f, indent=2)
+        logger.info(f"Updated opencode config with provider for {alias}")
+    except Exception as e:
+        logger.warning(f"Failed to update opencode config: {e}")
+    
     # Ждем пока модель загрузится (проверяем пингом)
     import aiohttp
     max_wait = 300  # максимум 5 минут
@@ -196,6 +227,10 @@ async def do_restart(self, user_id: int, model_alias: str = None):
     # Перезапускаем opencode serve
     MODEL = model.get("model", MODEL)
     await self.opencode_process.restart()
+    
+    # Очищаем сессию после переключения модели
+    self.session_mgr.remove(user_id)
+    logger.info(f"Cleared session for user {user_id} after model switch to {alias}")
     
     # Обновляем default_model
     DEFAULT_MODEL = alias
@@ -320,8 +355,7 @@ def get_current_model():
     """Возвращает текущую модель из конфига."""
     if not MODELS:
         return None
-    first_key = next(iter(MODELS))
-    return MODELS[first_key]
+    return MODELS.get(DEFAULT_MODEL)
 
 
 def get_model_by_alias(alias: str):
@@ -608,7 +642,7 @@ class VKLongPoll:
             return
 
         if text.strip() == "/clearsessions":
-            session_file = SCRIPT_DIR / self.config.get("session_file", "sessions.json")
+            session_file = SCRIPT_DIR / CONFIG.get("session_file", "sessions.json")
             if session_file.exists():
                 session_file.unlink()
                 await self.vk.send_message(user_id, "✅ Сессии удалены")
@@ -1122,33 +1156,91 @@ async def main():
     session_mgr = SessionManager(SESSION_FILE)
     logger.info(f"main() starting: SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}")
     
+    # Обновляем конфиг opencode при старте
+    try:
+        opencode_config_path = Path.home() / ".config/opencode/opencode.json"
+        opencode_config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": MODEL,
+            "provider": {
+                "llama.cpp": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "llama-server (local)",
+                    "options": {
+                        "baseURL": "http://localhost:8081/v1"
+                    },
+                    "models": {
+                        DEFAULT_MODEL: {
+                            "name": f"{DEFAULT_MODEL} (local)",
+                            "limit": {
+                                "context": 131072,
+                                "output": 65536
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        with open(opencode_config_path, "w") as f:
+            json.dump(opencode_config, f, indent=2)
+        logger.info(f"Updated opencode config at start: {MODEL}")
+    except Exception as e:
+        logger.warning(f"Failed to update opencode config at start: {e}")
+    
     # Проверяем запущен ли llama server
     import subprocess
+    llama_running = False
     try:
-        result = subprocess.run(
-            ["tmux", "has-session", "-t", "llama"],
-            capture_output=True
-        )
-        if result.returncode != 0:
-            # Сессия не существует, запускаем
-            logger.info("llama tmux session not found, starting with default model")
-            current_model = get_current_model()
-            if current_model:
-                await restart_llama_server(current_model, DEFAULT_MODEL)
-            else:
-                logger.warning("No models configured, cannot start llama server")
-    except Exception as e:
-        logger.warning(f"Failed to check llama session: {e}")
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get("http://localhost:8081/", timeout=2) as resp:
+                if resp.status == 200:
+                    llama_running = True
+                    logger.info("llama server already running")
+    except:
+        pass
+    
+    if not llama_running:
+        logger.info("llama server not running, starting with default model")
+        current_model = get_current_model()
+        if current_model:
+            await restart_llama_server(current_model, DEFAULT_MODEL)
+        else:
+            logger.warning("No models configured, cannot start llama server")
+    else:
+        logger.info("llama server already running, checking if model loaded...")
     
     opencode_process = OpenCodeProcess(logger, model=MODEL, workdir=SCRIPT_DIR)
     logger.info(f"OpenCodeProcess created with workdir={opencode_process.workdir}")
     await opencode_process.start()
+    
+    # Ждём пока модель загрузится
+    model_status = "⏳ Загрузка модели..."
+    max_wait = 300
+    waited = 0
+    model_ready = False
+    while waited < max_wait:
+        await asyncio.sleep(5)
+        waited += 5
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get("http://localhost:8081/v1/models", timeout=3) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("data"):
+                            model_ready = True
+                            break
+        except:
+            pass
+        logger.info(f"Waiting for model to load... ({waited}s)")
+    
+    model_status = "✅ Модель загружена" if model_ready else "⚠️ Модель не загружена (проверь вручную)"
+    
     async with VKClient(VK_TOKEN) as vk:
         # Отправляем сообщение о старте
         try:
             await vk.send_message(
                 5156890,
-                "🤖 OpenCode VK Gateway запущен\n\nModel: {}\nWorkdir: {}".format(MODEL, SCRIPT_DIR)
+                "🤖 OpenCode VK Gateway запущен\n\nModel: {}\nWorkdir: {}\nLLama: {}".format(MODEL, SCRIPT_DIR, model_status)
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")

@@ -38,7 +38,7 @@ logger = logging.getLogger("vk-reloader")
 
 # Путь к основному скрипту
 SCRIPT_DIR = Path(__file__).parent.resolve()
-MAIN_SCRIPT = SCRIPT_DIR / "v0.py"
+MAIN_SCRIPT = SCRIPT_DIR / "opencode-vk-gateway.py"
 PID_FILE = SCRIPT_DIR / ".gateway.pid"
 
 # Пути к версиям скрипта для запуска (приоритет: v1 -> v0 -> корень)
