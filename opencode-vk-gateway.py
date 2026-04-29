@@ -219,10 +219,8 @@ async def do_restart(self, user_id: int, model_alias: str = None):
         except:
             pass
     
-    if ready:
-        await self.vk.send_message(user_id, "✅ Модель готова!")
-    else:
-        await self.vk.send_message(user_id, "⚠️ Модель не ответила за 5 минут, продолжаю...")
+    if not ready:
+        logger.warning("Model did not respond in time")
     
     # Перезапускаем opencode serve
     MODEL = model.get("model", MODEL)
