@@ -169,7 +169,7 @@ async def do_restart(self, user_id: int, model_alias: str = None):
         await self.vk.send_message(user_id, "⚠️ Не удалось запустить llama server")
         logger.warning("Failed to restart llama server")
     
-    # Обновляем конфиг opencode с провайдером
+    # Обновляем конфиг opencode с провайдером и MCP
     try:
         opencode_config_path = Path.home() / ".config/opencode/opencode.json"
         opencode_config = {
@@ -194,9 +194,12 @@ async def do_restart(self, user_id: int, model_alias: str = None):
                 }
             }
         }
+        if MCP_SERVERS:
+            opencode_config["mcp"] = MCP_SERVERS
+            logger.info(f"Added {len(MCP_SERVERS)} MCP server(s) to opencode config")
         with open(opencode_config_path, "w") as f:
             json.dump(opencode_config, f, indent=2)
-        logger.info(f"Updated opencode config with provider for {alias}")
+        logger.info(f"Updated opencode config with provider and MCP for {alias}")
     except Exception as e:
         logger.warning(f"Failed to update opencode config: {e}")
     
@@ -265,6 +268,7 @@ VK_TOKEN = CONFIG["vk_token"]
 OPENCODE_URL = CONFIG["opencode_url"]
 SESSION_FILE = Path(CONFIG["session_file"])
 VK_API_VERSION = CONFIG["vk_api_version"]
+MCP_SERVERS = CONFIG.get("mcp_servers", {})
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
 THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
 MODEL = CONFIG.get("model")
@@ -1154,7 +1158,7 @@ async def main():
     session_mgr = SessionManager(SESSION_FILE)
     logger.info(f"main() starting: SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}")
     
-    # Обновляем конфиг opencode при старте
+    # Обновляем конфиг opencode при старте с MCP
     try:
         opencode_config_path = Path.home() / ".config/opencode/opencode.json"
         opencode_config = {
@@ -1179,9 +1183,12 @@ async def main():
                 }
             }
         }
+        if MCP_SERVERS:
+            opencode_config["mcp"] = MCP_SERVERS
+            logger.info(f"Added {len(MCP_SERVERS)} MCP server(s) to opencode config")
         with open(opencode_config_path, "w") as f:
             json.dump(opencode_config, f, indent=2)
-        logger.info(f"Updated opencode config at start: {MODEL}")
+        logger.info(f"Updated opencode config at start with MCP: {MODEL}")
     except Exception as e:
         logger.warning(f"Failed to update opencode config at start: {e}")
     

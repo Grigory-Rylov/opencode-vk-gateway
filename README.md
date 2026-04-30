@@ -52,12 +52,31 @@ cp config.json.example config.json
 - `models` - доступные модели и их параметры запуска
 - `default_model` - модель по умолчанию
 - `thinking_peer_id` - ID чата для отправки промежуточных рассуждений
+- `mcp_servers` - (опционально) MCP серверы для opencode
 
 ## Принцип работы
 
 ### Подмена конфига OpenCode
 
-OpenCode требует настройку провайдера для подключения к локальному llama-server. При старте бота и при переключении модели происходит автоматическое обновление конфига `~/.config/opencode/opencode.json`:
+OpenCode требует настройку провайдера для подключения к локальному llama-server. При старте бота и при переключении модели происходит автоматическое обновление конфига `~/.config/opencode/opencode.json`.
+
+#### MCP серверы
+
+В секцию `mcp_servers` config.json можно добавить MCP серверы которые будут доступны в opencode:
+
+```json
+{
+  "mcp_servers": {
+    "ya-disk-uploader": {
+      "type": "local",
+      "command": ["/path/to/ya-disk-uploader/ya-disk-uploader", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Если секция `mcp_servers` не указана или пуста, MCP серверы не будут добавлены.
 
 ```json
 {
