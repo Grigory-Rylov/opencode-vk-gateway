@@ -13,6 +13,7 @@ import logging
 import socket
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -448,6 +449,7 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
+        """Send message using GET request (legacy, may fail with long messages)."""
         params = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -461,6 +463,35 @@ class VKClient:
 
         resp = await self._api_request("messages.send", params)
         return resp[0]["message_id"] if isinstance(resp, list) else resp
+
+    async def send_message_post(
+        self,
+        peer_id: int,
+        text: str = "",
+        attachment: str = "",
+        keyboard: Optional[dict] = None,
+    ) -> int:
+        """Send message using POST request (supports longer messages, avoids 414 errors)."""
+        payload = {
+            "peer_id": peer_id,
+            "random_id": int(time.time() * 1000),
+            "v": VK_API_VERSION,
+            "access_token": self.token,
+        }
+        if text:
+            payload["message"] = text
+        if attachment:
+            payload["attachment"] = attachment
+        if keyboard:
+            payload["keyboard"] = json.dumps(keyboard)
+
+        url = f"{self.BASE_URL}messages.send"
+        async with self.session.post(url, data=payload) as resp:
+            data = await resp.json()
+            if "error" in data:
+                raise Exception(f"VK API error: {data['error']}")
+            resp_data = data["response"]
+            return resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
 
     async def send_question_keyboard(
         self, peer_id: int, header: str, question_text: str, options: List[dict]
@@ -647,9 +678,14 @@ class VKLongPoll:
             session_file = SCRIPT_DIR / CONFIG.get("session_file", "sessions.json")
             if session_file.exists():
                 session_file.unlink()
-                await self.vk.send_message(user_id, "✅ Сессии удалены")
+            
+            opencode_data_dir = Path.home() / ".local" / "share" / "opencode"
+            if opencode_data_dir.exists():
+                import shutil
+                shutil.rmtree(opencode_data_dir)
+                await self.vk.send_message(user_id, "✅ Сессии и папка ~/.local/share/opencode удалены")
             else:
-                await self.vk.send_message(user_id, "ℹ️ Файл sessions.json не найден")
+                await self.vk.send_message(user_id, "✅ Сессии удалены (папка ~/.local/share/opencode не найдена)")
             return
 
         if text.strip().startswith("/logs"):
@@ -889,12 +925,15 @@ class VKLongPoll:
                     await self._show_question(user_id, event)
                     question_asked = True
                     break
-                elif event_type == "session.idle":
+
+                # Handle session completion - send response in parts if needed
+                elif event_type in ("session.idle", "session.completed"):
                     if final_text:
-                        await self.vk.send_message(user_id, final_text)
+                        await self._send_long_message(user_id, final_text)
                     else:
                         await self._send_final_message(user_id, session_id)
                     break
+                
                 elif event_type == "session.error":
                     props = event.get("properties", {})
                     error = props.get("error", {})
@@ -941,8 +980,19 @@ class VKLongPoll:
             logger.info(f"OpenCode flow cancelled for user {user_id}")
             raise
         except Exception as e:
+            error_msg = str(e)
             logger.exception(f"OpenCode flow error for {user_id}: {e}")
-            await self.vk.send_message(user_id, "⚠️ Произошла ошибка, попробуйте позже.")
+            
+            if "414" in error_msg or "414," in error_msg:
+                await self.vk.send_message(user_id, "❌ Сообщение слишком длинное. Попробуйте более короткий запрос.")
+            elif "text/html" in error_msg:
+                await self.vk.send_message(user_id, "❌ Ошибка VK API (возможно, превышен лимит). Попробуйте позже.")
+            elif "timeout" in error_msg.lower():
+                await self.vk.send_message(user_id, "⌚ Истекло время ожидания. Попробуйте ещё раз.")
+            elif "connection" in error_msg.lower():
+                await self.vk.send_message(user_id, "🔌 Проблема с соединением. Попробуйте позже.")
+            else:
+                await self.vk.send_message(user_id, f"⚠️ Ошибка: {error_msg[:200]}")
         finally:
             monitor_task.cancel()
             try:
@@ -1029,6 +1079,77 @@ class VKLongPoll:
                             )
                             continue
 
+                        # Handle session.updated with permission field
+                        if event_type == "session.updated":
+                            props = event.get("properties", {})
+                            info = props.get("info", {})
+                            session_id = props.get("sessionID")
+                            parent_id = info.get("parentID", "")
+                            permissions = info.get("permission", [])
+                            
+                            # Track subagent status
+                            if parent_id:
+                                summary = info.get("summary", {})
+                                if summary:
+                                    additions = summary.get("additions", 0)
+                                    deletions = summary.get("deletions", 0)
+                                    files = summary.get("files", 0)
+                                    logger.info(f"Subagent {session_id} completed: +{additions} -{deletions}, {files} files")
+                            
+                            if permissions:
+                                logger.info(f"session.updated with {len(permissions)} permission(s)")
+                                for perm in permissions:
+                                    perm_type = perm.get("permission", "unknown")
+                                    perm_action = perm.get("action")
+                                    perm_pattern = perm.get("pattern", "*")
+
+                                    if perm_action is None or perm_action == "request":
+                                        perm_id = f"sess_{uuid.uuid4().hex[:12]}"
+                                        logger.info(f"Permission request via session.updated: {perm_id}, type={perm_type}, action={perm_action}, pattern={perm_pattern}")
+
+                                        self.pending_permissions[perm_id] = (session_id, user_id)
+
+                                        buttons = [
+                                            [
+                                                {
+                                                    "action": {
+                                                        "type": "text",
+                                                        "label": "✅ Разрешить",
+                                                        "payload": json.dumps({"permission_id": perm_id, "action": "allow"}),
+                                                    },
+                                                    "color": "positive",
+                                                },
+                                                {
+                                                    "action": {
+                                                        "type": "text",
+                                                        "label": "❌ Отказать",
+                                                        "payload": json.dumps({"permission_id": perm_id, "action": "deny"}),
+                                                    },
+                                                    "color": "negative",
+                                                },
+                                            ]
+                                        ]
+
+                                        keyboard = {
+                                            "inline": True,
+                                            "buttons": buttons,
+                                        }
+
+                                        try:
+                                            await self.vk.send_message(
+                                                user_id,
+                                                f"🔒 Запрос разрешения на доступ:\n"
+                                                f"Тип: {perm_type}\n"
+                                                f"Путь: {perm_pattern}",
+                                                keyboard=keyboard
+                                            )
+                                            logger.info(f"Permission keyboard sent for {perm_id}")
+                                        except Exception as e:
+                                            logger.error(f"Failed to send permission keyboard: {e}")
+                                    elif perm_action in ("allow", "deny"):
+                                        logger.info(f"Permission already decided: {perm_type} -> {perm_action}")
+                                continue
+
                         await event_queue.put(event)
         except asyncio.CancelledError:
             logger.info(f"SSE monitor cancelled for {session_id}")
@@ -1112,10 +1233,65 @@ class VKLongPoll:
                     if part.get("type") in ("text", "reasoning"):
                         text += part.get("text", "")
                 if text:
-                    await self.vk.send_message(user_id, text)
+                    await self._send_long_message(user_id, text)
                 else:
                     logger.warning("Assistant message has no text content")
                     await self.vk.send_message(user_id, "⚠️ Пустой ответ от opencode")
+
+    async def _send_long_message(self, user_id: int, text: str, max_length: int = 4090):
+        """Send a long message in parts to avoid VK API limits.
+        
+        VK API messages.send has a hard limit of 4096 characters.
+        We use 4090 as the safe limit and split longer texts into parts.
+        Each part gets a prefix like [Часть 1/3]\n which takes ~15-20 chars.
+        Uses POST request to avoid URL length limitations (414 errors).
+        """
+        if len(text) <= max_length:
+            await self.vk.send_message_post(user_id, text)
+            return
+        
+        # Reserve space for the prefix "[Часть N/M]\n" (~15-20 chars)
+        # Using 25 to be safe for both single-digit and double-digit counts
+        safe_content_limit = max_length - 25
+        if safe_content_limit < 100:
+            safe_content_limit = 100  # minimum chunk size
+        
+        logger.info(f"Sending long message ({len(text)} chars) in parts to user {user_id}")
+        logger.info(f"Max message length: {max_length}, Safe content limit: {safe_content_limit}")
+        
+        parts = []
+        current_part = ""
+        lines = text.split('\n')
+        
+        for line in lines:
+            if len(current_part) + len(line) + 1 > safe_content_limit:
+                if current_part:
+                    parts.append(current_part)
+                    current_part = line
+                else:
+                    # Single line exceeds safe_content_limit - split it
+                    parts.append(line[:safe_content_limit])
+                    current_part = line[safe_content_limit:]
+            else:
+                if current_part:
+                    current_part += '\n' + line
+                else:
+                    current_part = line
+        
+        if current_part:
+            parts.append(current_part)
+        
+        # Safety check: ensure no part exceeds the actual VK limit
+        for i, part in enumerate(parts):
+            if len(part) > safe_content_limit:
+                logger.warning(f"Part {i+1} exceeds safe_content_limit ({len(part)} > {safe_content_limit}), trimming")
+                parts[i] = part[:safe_content_limit]
+        
+        for i, part in enumerate(parts):
+            logger.info(f"Sending part {i+1}/{len(parts)} ({len(part)} chars content)")
+            await self.vk.send_message_post(user_id, f"[Часть {i+1}/{len(parts)}]\n{part}")
+            if i < len(parts) - 1:
+                await asyncio.sleep(0.5)
 
     async def run(self):
         self.running = True

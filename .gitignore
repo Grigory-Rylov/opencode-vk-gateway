@@ -10,3 +10,5 @@ messages.json
 history_*.json
 .gateway.pid
 config.json
+v0.py
+v1.py

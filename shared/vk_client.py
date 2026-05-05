@@ -52,6 +52,7 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
+        """Send message using GET request (legacy, may fail with long messages)."""
         params = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -65,6 +66,35 @@ class VKClient:
 
         resp = await self._api_request("messages.send", params)
         return resp[0]["message_id"] if isinstance(resp, list) else resp
+
+    async def send_message_post(
+        self,
+        peer_id: int,
+        text: str = "",
+        attachment: str = "",
+        keyboard: Optional[dict] = None,
+    ) -> int:
+        """Send message using POST request (supports longer messages, avoids 414 errors)."""
+        payload = {
+            "peer_id": peer_id,
+            "random_id": int(time.time() * 1000),
+            "v": self.api_version,
+            "access_token": self.token,
+        }
+        if text:
+            payload["message"] = text
+        if attachment:
+            payload["attachment"] = attachment
+        if keyboard:
+            payload["keyboard"] = json.dumps(keyboard)
+
+        url = f"{self.BASE_URL}messages.send"
+        async with self.session.post(url, data=payload) as resp:
+            data = await resp.json()
+            if "error" in data:
+                raise Exception(f"VK API error: {data['error']}")
+            resp_data = data["response"]
+            return resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
 
     async def send_question_keyboard(
         self, peer_id: int, header: str, question_text: str, options: list[dict]
