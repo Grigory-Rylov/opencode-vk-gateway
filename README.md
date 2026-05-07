@@ -49,10 +49,28 @@ cp config.json.example config.json
 - `vk_token` - VK API токен (получить [тут](https://vk.com/dev))
 - `opencode_url` - URL opencode serve (по умолчанию localhost:4096)
 - `llama_server_path` - путь к llama-server
+- `model` - модель по умолчанию в формате `llama.cpp/название-модели` (строка)
 - `models` - доступные модели и их параметры запуска
-- `default_model` - модель по умолчанию
+- `default_model` - алиас модели по умолчанию
 - `thinking_peer_id` - ID чата для отправки промежуточных рассуждений
 - `mcp_servers` - (опционально) MCP серверы для opencode
+
+### Формат модели
+
+Модель указывается строкой формата `провайдер/название`:
+```json
+"model": "llama.cpp/qwen3.6-claude"
+```
+
+Для каждой модели в секции `models`:
+```json
+"models": {
+  "qwen3.6-claude": {
+    "model": "llama.cpp/qwen3.6-claude",
+    "args": "-m /path/to/model.gguf --port 8081 ..."
+  }
+}
+```
 
 ## Принцип работы
 

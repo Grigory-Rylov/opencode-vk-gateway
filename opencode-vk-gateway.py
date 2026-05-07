@@ -368,6 +368,18 @@ def get_model_by_alias(alias: str):
     return MODELS.get(alias)
 
 
+def model_to_api_format(model: str) -> dict:
+    """Преобразует модель в формат для API OpenCode."""
+    if not model:
+        return {}
+    if isinstance(model, dict):
+        return {"model": model}
+    if "/" in model:
+        providerID, model_id = model.split("/", 1)
+        return {"model": {"id": model_id, "providerID": providerID}}
+    return {"model": {"id": model, "providerID": "llama.cpp"}}
+
+
 # ---------- Управление сессиями OpenCode ----------
 class SessionManager:
     def __init__(self, file_path: Path):
@@ -391,7 +403,7 @@ class SessionManager:
             return self.sessions[user_id]
 
         async with ClientSession() as session:
-            data = {"model": MODEL} if MODEL else {}
+            data = model_to_api_format(MODEL)
             async with session.post(f"{OPENCODE_URL}/session", json=data) as resp:
                 resp.raise_for_status()
                 resp_data = await resp.json()
@@ -844,7 +856,7 @@ class VKLongPoll:
             
             # Создаём новую сессию через API
             async with ClientSession() as session:
-                data = {"model": MODEL} if MODEL else {}
+                data = model_to_api_format(MODEL)
                 async with session.post(f"{OPENCODE_URL}/session", json=data) as resp:
                     if resp.status != 200:
                         text = await resp.text()
@@ -1029,11 +1041,13 @@ class VKLongPoll:
 
                         logger.info(f"SSE raw event: {event}")
 
+                        event_type = event.get("type")
                         event_session = event.get("properties", {}).get("sessionID")
-                        if event_session != session_id:
+                        if event_type in ("permission.asked", "permission.replied", "message.part.updated"):
+                            pass
+                        elif event_session != session_id:
                             continue
 
-                        event_type = event.get("type")
                         if event_type == "permission.asked":
                             props = event.get("properties", {})
                             permission_id = props.get("id")
