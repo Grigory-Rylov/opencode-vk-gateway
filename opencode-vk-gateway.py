@@ -206,8 +206,8 @@ async def do_restart(self, user_id: int, model_alias: str = None):
     
     # Ждем пока модель загрузится (проверяем пингом)
     import aiohttp
-    max_wait = 300  # максимум 5 минут
-    check_interval = 10
+    max_wait = 300
+    check_interval = 5
     waited = 0
     ready = False
     
@@ -223,8 +223,12 @@ async def do_restart(self, user_id: int, model_alias: str = None):
         except:
             pass
     
-    if not ready:
-        logger.warning("Model did not respond in time")
+    if ready:
+        await self.vk.send_message(user_id, f"✅ Модель {alias} загружена и готова!")
+        logger.info(f"Model {alias} loaded successfully")
+    else:
+        await self.vk.send_message(user_id, f"⚠️ Модель {alias} не ответила за {max_wait} сек, продолжаю...")
+        logger.warning(f"Model {alias} did not respond in time")
     
     # Перезапускаем opencode serve
     MODEL = model.get("model", MODEL)
@@ -232,7 +236,9 @@ async def do_restart(self, user_id: int, model_alias: str = None):
     
     # Очищаем сессию после переключения модели
     self.session_mgr.remove(user_id)
-    logger.info(f"Cleared session for user {user_id} after model switch to {alias}")
+    if SESSION_FILE.exists():
+        SESSION_FILE.unlink()
+        logger.info(f"Cleared session for user {user_id} and deleted sessions file after model switch to {alias}")
     
     # Обновляем default_model
     DEFAULT_MODEL = alias
@@ -269,13 +275,13 @@ VK_TOKEN = CONFIG["vk_token"]
 OPENCODE_URL = CONFIG["opencode_url"]
 SESSION_FILE = Path(CONFIG["session_file"])
 VK_API_VERSION = CONFIG["vk_api_version"]
-MCP_SERVERS = CONFIG.get("mcp_servers", {})
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
 THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
 MODEL = CONFIG.get("model")
 MODELS = CONFIG.get("models", [])
 DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", "llama-server")
+MCP_SERVERS = CONFIG.get("mcp_servers", {})
 
 if not VK_TOKEN:
     raise ValueError("VK_TOKEN is required in config file")
@@ -461,7 +467,6 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
-        """Send message using GET request (legacy, may fail with long messages)."""
         params = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -475,35 +480,6 @@ class VKClient:
 
         resp = await self._api_request("messages.send", params)
         return resp[0]["message_id"] if isinstance(resp, list) else resp
-
-    async def send_message_post(
-        self,
-        peer_id: int,
-        text: str = "",
-        attachment: str = "",
-        keyboard: Optional[dict] = None,
-    ) -> int:
-        """Send message using POST request (supports longer messages, avoids 414 errors)."""
-        payload = {
-            "peer_id": peer_id,
-            "random_id": int(time.time() * 1000),
-            "v": VK_API_VERSION,
-            "access_token": self.token,
-        }
-        if text:
-            payload["message"] = text
-        if attachment:
-            payload["attachment"] = attachment
-        if keyboard:
-            payload["keyboard"] = json.dumps(keyboard)
-
-        url = f"{self.BASE_URL}messages.send"
-        async with self.session.post(url, data=payload) as resp:
-            data = await resp.json()
-            if "error" in data:
-                raise Exception(f"VK API error: {data['error']}")
-            resp_data = data["response"]
-            return resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
 
     async def send_question_keyboard(
         self, peer_id: int, header: str, question_text: str, options: List[dict]
@@ -641,9 +617,14 @@ class VKLongPoll:
             logger.debug("Ignoring /update command (handled by reloader)")
             return
 
-        if text.strip().startswith("/restart"):
+        if text.strip().startswith("/restart") or text.strip().startswith("/r"):
             parts = text.strip().split()
-            model_alias = parts[1] if len(parts) > 1 else None
+            if text.strip().startswith("/r ") and len(parts) > 1:
+                model_alias = parts[1]
+            elif len(parts) > 1:
+                model_alias = parts[1]
+            else:
+                model_alias = None
             
             if model_alias:
                 model_info, error = await do_restart(self, user_id, model_alias)
@@ -659,7 +640,7 @@ class VKLongPoll:
                     await self.vk.send_message(user_id, f"✅ Модель {model_info} загружена")
             return
 
-        if text.strip().startswith("/models"):
+        if text.strip().startswith("/models") or text.strip() == "/m":
             if not MODELS:
                 await self.vk.send_message(user_id, "Нет доступных моделей")
             else:
@@ -687,17 +668,12 @@ class VKLongPoll:
             return
 
         if text.strip() == "/clearsessions":
-            session_file = SCRIPT_DIR / CONFIG.get("session_file", "sessions.json")
+            session_file = SCRIPT_DIR / self.config.get("session_file", "sessions.json")
             if session_file.exists():
                 session_file.unlink()
-            
-            opencode_data_dir = Path.home() / ".local" / "share" / "opencode"
-            if opencode_data_dir.exists():
-                import shutil
-                shutil.rmtree(opencode_data_dir)
-                await self.vk.send_message(user_id, "✅ Сессии и папка ~/.local/share/opencode удалены")
+                await self.vk.send_message(user_id, "✅ Сессии удалены")
             else:
-                await self.vk.send_message(user_id, "✅ Сессии удалены (папка ~/.local/share/opencode не найдена)")
+                await self.vk.send_message(user_id, "ℹ️ Файл sessions.json не найден")
             return
 
         if text.strip().startswith("/logs"):
@@ -711,6 +687,10 @@ class VKLongPoll:
 
         if text.strip() == "/help":
             await self._send_help(user_id)
+            return
+
+        if text.strip() == "/gpu":
+            await self._handle_gpu_command(user_id)
             return
 
         if user_id in self.waiting_for_answer:
@@ -883,20 +863,73 @@ class VKLongPoll:
             sessions_text += f"• `{sid}` (user={uid}) {marker}\n"
         await self.vk.send_message(user_id, f"📋 **Список сессий**:\n\n{sessions_text}")
 
+    async def _handle_gpu_command(self, user_id: int):
+        """Execute nvidia-smi and return GPU information."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "nvidia-smi",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=30,
+            )
+            
+            if process.returncode == 0:
+                output = stdout.decode("utf-8", errors="replace")
+                await self.vk.send_message(user_id, output)
+            else:
+                error = stderr.decode("utf-8", errors="replace")
+                await self.vk.send_message(
+                    user_id,
+                    f"❌ Ошибка при выполнении nvidia-smi (код {process.returncode}):\n"
+                    f"{error[:2000]}"
+                )
+        except asyncio.TimeoutError:
+            await self.vk.send_message(
+                user_id,
+                "⏱️ Истекло время ожидания nvidia-smi\n"
+                "Возможная причина: ошибка драйвера NVIDIA\n"
+                "Попробуйте проверить: nvidia-smi -q или dmesg | grep nvidia"
+            )
+        except FileNotFoundError:
+            await self.vk.send_message(
+                user_id,
+                "❌ nvidia-smi не найден. Установите NVIDIA драйверы."
+            )
+        except Exception as e:
+            error_msg = str(e)
+            if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                await self.vk.send_message(
+                    user_id,
+                    "⏱️ Команда nvidia-smi зависла\n"
+                    "Возможная причина: ошибка драйвера NVIDIA\n"
+                    "Попробуйте проверить: dmesg | grep nvidia"
+                )
+            else:
+                await self.vk.send_message(
+                    user_id,
+                    f"❌ Ошибка: {error_msg[:2000]}"
+                )
+
     async def _send_help(self, user_id: int):
         help_text = """
 🤖 **OpenCode VK Gateway - Команды**
 
 /history - Получить историю сессии файлом
 /history <session_id> - Получить историю конкретной сессии
+/gpu - Показать информацию о GPU (nvidia-smi)
 /logs - Отправить файл логов
 /sessions - Показать список всех сессий
 /clearsessions - Удалить все сессии
 /models - Показать доступные модели
+/m - То же что /models
 /newsession - Создать новую сессию
 /help - Показать эту справку
 /restart - Перезапустить с текущей моделью
 /restart <model> - Перезапустить с указанной моделью
+/r <model> - То же что /restart <model>
 
 Все остальные сообщения отправляются в opencode для обработки.
 """
@@ -937,7 +970,6 @@ class VKLongPoll:
                     await self._show_question(user_id, event)
                     question_asked = True
                     break
-
                 # Handle session completion - send response in parts if needed
                 elif event_type in ("session.idle", "session.completed"):
                     if final_text:
@@ -945,7 +977,6 @@ class VKLongPoll:
                     else:
                         await self._send_final_message(user_id, session_id)
                     break
-                
                 elif event_type == "session.error":
                     props = event.get("properties", {})
                     error = props.get("error", {})
@@ -992,19 +1023,8 @@ class VKLongPoll:
             logger.info(f"OpenCode flow cancelled for user {user_id}")
             raise
         except Exception as e:
-            error_msg = str(e)
             logger.exception(f"OpenCode flow error for {user_id}: {e}")
-            
-            if "414" in error_msg or "414," in error_msg:
-                await self.vk.send_message(user_id, "❌ Сообщение слишком длинное. Попробуйте более короткий запрос.")
-            elif "text/html" in error_msg:
-                await self.vk.send_message(user_id, "❌ Ошибка VK API (возможно, превышен лимит). Попробуйте позже.")
-            elif "timeout" in error_msg.lower():
-                await self.vk.send_message(user_id, "⌚ Истекло время ожидания. Попробуйте ещё раз.")
-            elif "connection" in error_msg.lower():
-                await self.vk.send_message(user_id, "🔌 Проблема с соединением. Попробуйте позже.")
-            else:
-                await self.vk.send_message(user_id, f"⚠️ Ошибка: {error_msg[:200]}")
+            await self.vk.send_message(user_id, "⚠️ Произошла ошибка, попробуйте позже.")
         finally:
             monitor_task.cancel()
             try:
@@ -1041,13 +1061,11 @@ class VKLongPoll:
 
                         logger.info(f"SSE raw event: {event}")
 
-                        event_type = event.get("type")
                         event_session = event.get("properties", {}).get("sessionID")
-                        if event_type in ("permission.asked", "permission.replied", "message.part.updated"):
-                            pass
-                        elif event_session != session_id:
+                        if event_session != session_id:
                             continue
 
+                        event_type = event.get("type")
                         if event_type == "permission.asked":
                             props = event.get("properties", {})
                             permission_id = props.get("id")
@@ -1092,77 +1110,6 @@ class VKLongPoll:
                                 keyboard=keyboard
                             )
                             continue
-
-                        # Handle session.updated with permission field
-                        if event_type == "session.updated":
-                            props = event.get("properties", {})
-                            info = props.get("info", {})
-                            session_id = props.get("sessionID")
-                            parent_id = info.get("parentID", "")
-                            permissions = info.get("permission", [])
-                            
-                            # Track subagent status
-                            if parent_id:
-                                summary = info.get("summary", {})
-                                if summary:
-                                    additions = summary.get("additions", 0)
-                                    deletions = summary.get("deletions", 0)
-                                    files = summary.get("files", 0)
-                                    logger.info(f"Subagent {session_id} completed: +{additions} -{deletions}, {files} files")
-                            
-                            if permissions:
-                                logger.info(f"session.updated with {len(permissions)} permission(s)")
-                                for perm in permissions:
-                                    perm_type = perm.get("permission", "unknown")
-                                    perm_action = perm.get("action")
-                                    perm_pattern = perm.get("pattern", "*")
-
-                                    if perm_action is None or perm_action == "request":
-                                        perm_id = f"sess_{uuid.uuid4().hex[:12]}"
-                                        logger.info(f"Permission request via session.updated: {perm_id}, type={perm_type}, action={perm_action}, pattern={perm_pattern}")
-
-                                        self.pending_permissions[perm_id] = (session_id, user_id)
-
-                                        buttons = [
-                                            [
-                                                {
-                                                    "action": {
-                                                        "type": "text",
-                                                        "label": "✅ Разрешить",
-                                                        "payload": json.dumps({"permission_id": perm_id, "action": "allow"}),
-                                                    },
-                                                    "color": "positive",
-                                                },
-                                                {
-                                                    "action": {
-                                                        "type": "text",
-                                                        "label": "❌ Отказать",
-                                                        "payload": json.dumps({"permission_id": perm_id, "action": "deny"}),
-                                                    },
-                                                    "color": "negative",
-                                                },
-                                            ]
-                                        ]
-
-                                        keyboard = {
-                                            "inline": True,
-                                            "buttons": buttons,
-                                        }
-
-                                        try:
-                                            await self.vk.send_message(
-                                                user_id,
-                                                f"🔒 Запрос разрешения на доступ:\n"
-                                                f"Тип: {perm_type}\n"
-                                                f"Путь: {perm_pattern}",
-                                                keyboard=keyboard
-                                            )
-                                            logger.info(f"Permission keyboard sent for {perm_id}")
-                                        except Exception as e:
-                                            logger.error(f"Failed to send permission keyboard: {e}")
-                                    elif perm_action in ("allow", "deny"):
-                                        logger.info(f"Permission already decided: {perm_type} -> {perm_action}")
-                                continue
 
                         await event_queue.put(event)
         except asyncio.CancelledError:
@@ -1247,31 +1194,23 @@ class VKLongPoll:
                     if part.get("type") in ("text", "reasoning"):
                         text += part.get("text", "")
                 if text:
-                    await self._send_long_message(user_id, text)
+                    await self.vk.send_message(user_id, text)
                 else:
                     logger.warning("Assistant message has no text content")
                     await self.vk.send_message(user_id, "⚠️ Пустой ответ от opencode")
 
     async def _send_long_message(self, user_id: int, text: str, max_length: int = 4090):
-        """Send a long message in parts to avoid VK API limits.
-        
-        VK API messages.send has a hard limit of 4096 characters.
-        We use 4090 as the safe limit and split longer texts into parts.
-        Each part gets a prefix like [Часть 1/3]\n which takes ~15-20 chars.
-        Uses POST request to avoid URL length limitations (414 errors).
-        """
+        """Send a long message in parts to avoid VK API limits."""
         if len(text) <= max_length:
-            await self.vk.send_message_post(user_id, text)
+            await self.vk.send_message(user_id, text)
             return
         
         # Reserve space for the prefix "[Часть N/M]\n" (~15-20 chars)
-        # Using 25 to be safe for both single-digit and double-digit counts
         safe_content_limit = max_length - 25
         if safe_content_limit < 100:
-            safe_content_limit = 100  # minimum chunk size
+            safe_content_limit = 100
         
         logger.info(f"Sending long message ({len(text)} chars) in parts to user {user_id}")
-        logger.info(f"Max message length: {max_length}, Safe content limit: {safe_content_limit}")
         
         parts = []
         current_part = ""
@@ -1295,7 +1234,7 @@ class VKLongPoll:
         if current_part:
             parts.append(current_part)
         
-        # Safety check: ensure no part exceeds the actual VK limit
+        # Safety check
         for i, part in enumerate(parts):
             if len(part) > safe_content_limit:
                 logger.warning(f"Part {i+1} exceeds safe_content_limit ({len(part)} > {safe_content_limit}), trimming")
@@ -1303,7 +1242,7 @@ class VKLongPoll:
         
         for i, part in enumerate(parts):
             logger.info(f"Sending part {i+1}/{len(parts)} ({len(part)} chars content)")
-            await self.vk.send_message_post(user_id, f"[Часть {i+1}/{len(parts)}]\n{part}")
+            await self.vk.send_message(user_id, f"[Часть {i+1}/{len(parts)}]\n{part}")
             if i < len(parts) - 1:
                 await asyncio.sleep(0.5)
 
@@ -1348,94 +1287,33 @@ async def main():
     session_mgr = SessionManager(SESSION_FILE)
     logger.info(f"main() starting: SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}")
     
-    # Обновляем конфиг opencode при старте с MCP
-    try:
-        opencode_config_path = Path.home() / ".config/opencode/opencode.json"
-        opencode_config = {
-            "$schema": "https://opencode.ai/config.json",
-            "model": MODEL,
-            "provider": {
-                "llama.cpp": {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "name": "llama-server (local)",
-                    "options": {
-                        "baseURL": "http://localhost:8081/v1"
-                    },
-                    "models": {
-                        DEFAULT_MODEL: {
-                            "name": f"{DEFAULT_MODEL} (local)",
-                            "limit": {
-                                "context": 131072,
-                                "output": 65536
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if MCP_SERVERS:
-            opencode_config["mcp"] = MCP_SERVERS
-            logger.info(f"Added {len(MCP_SERVERS)} MCP server(s) to opencode config")
-        with open(opencode_config_path, "w") as f:
-            json.dump(opencode_config, f, indent=2)
-        logger.info(f"Updated opencode config at start with MCP: {MODEL}")
-    except Exception as e:
-        logger.warning(f"Failed to update opencode config at start: {e}")
-    
     # Проверяем запущен ли llama server
     import subprocess
-    llama_running = False
     try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get("http://localhost:8081/", timeout=2) as resp:
-                if resp.status == 200:
-                    llama_running = True
-                    logger.info("llama server already running")
-    except:
-        pass
-    
-    if not llama_running:
-        logger.info("llama server not running, starting with default model")
-        current_model = get_current_model()
-        if current_model:
-            await restart_llama_server(current_model, DEFAULT_MODEL)
-        else:
-            logger.warning("No models configured, cannot start llama server")
-    else:
-        logger.info("llama server already running, checking if model loaded...")
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", "llama"],
+            capture_output=True
+        )
+        if result.returncode != 0:
+            # Сессия не существует, запускаем
+            logger.info("llama tmux session not found, starting with default model")
+            current_model = get_current_model()
+            if current_model:
+                await restart_llama_server(current_model, DEFAULT_MODEL)
+            else:
+                logger.warning("No models configured, cannot start llama server")
+    except Exception as e:
+        logger.warning(f"Failed to check llama session: {e}")
     
     opencode_process = OpenCodeProcess(logger, model=MODEL, workdir=SCRIPT_DIR)
     logger.info(f"OpenCodeProcess created with workdir={opencode_process.workdir}")
     await opencode_process.start()
-    
-    # Ждём пока модель загрузится
-    model_status = "⏳ Загрузка модели..."
-    max_wait = 300
-    waited = 0
-    model_ready = False
-    while waited < max_wait:
-        await asyncio.sleep(5)
-        waited += 5
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.get("http://localhost:8081/v1/models", timeout=3) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("data"):
-                            model_ready = True
-                            break
-        except:
-            pass
-        logger.info(f"Waiting for model to load... ({waited}s)")
-    
-    model_status = "✅ Модель загружена" if model_ready else "⚠️ Модель не загружена (проверь вручную)"
-    
     async with VKClient(VK_TOKEN) as vk:
         # Отправляем сообщение о старте
         try:
             await vk.send_message(
                 5156890,
-                "🤖 OpenCode VK Gateway запущен\n\nModel: {}\nWorkdir: {}\nLLama: {}".format(MODEL, SCRIPT_DIR, model_status)
+                "🤖 OpenCode VK Gateway запущен\n\nModel: {}\nWorkdir: {}".format(MODEL, SCRIPT_DIR)
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")
