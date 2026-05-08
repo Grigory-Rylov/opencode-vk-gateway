@@ -6,8 +6,12 @@ import time
 from typing import Optional
 from urllib.parse import urlencode
 
+import logging
+
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
+
+logger = logging.getLogger("vk-opencode")
 
 
 class VKClient:
@@ -96,20 +100,64 @@ class VKClient:
             resp_data = data["response"]
             return resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
 
-    async def send_question_keyboard(
-        self, peer_id: int, header: str, question_text: str, options: list[dict]
+    async def send_keyboard(
+       self, peer_id: int, text: str, buttons: list
     ):
-        buttons = []
-        for opt in options:
-            buttons.append(
-                [
-                    {
-                        "action": {"type": "text", "label": opt["label"]},
-                        "color": "primary",
-                    }
-                ]
-            )
-
+        """Отправить сообщение с клавиатурой (кнопки-действия)."""
+        logger.info(f"[/models debug] send_keyboard called for peer_id={peer_id}, buttons={len(buttons)}")
         keyboard = {"inline": False, "buttons": buttons}
-        text = f"🔧 {header}\n\n{question_text}"
         await self.send_message(peer_id, text, keyboard=keyboard)
+        logger.info(f"[/models debug] send_keyboard completed for peer_id={peer_id}")
+
+    async def send_file(
+        self, peer_id: int, file_path: str, filename: str, caption: str = ""
+    ) -> int:
+        logger.info(f"send_file: file={file_path}, peer_id={peer_id}")
+        params = {
+            "access_token": self.token,
+            "v": self.api_version,
+            "type": "doc",
+            "peer_id": peer_id,
+        }
+        url = f"{self.BASE_URL}docs.getMessagesUploadServer?{urlencode(params)}"
+        logger.info(f"send_file: getting upload url: {url}")
+        async with self.session.get(url) as resp:
+            data = await resp.json()
+            logger.info(f"send_file: upload response: {data}")
+            if "error" in data:
+                raise Exception(f"VK API error getting upload url: {data['error']}")
+            upload_url = data["response"]["upload_url"]
+            logger.info(f"send_file: upload_url={upload_url}")
+
+        with open(file_path, "rb") as f:
+            content = f.read()
+        form_data = aiohttp.FormData()
+        form_data.add_field("file", content, filename=filename, content_type="application/json")
+        async with self.session.post(upload_url, data=form_data) as resp:
+            upload_data = await resp.json()
+            logger.info(f"send_file: upload_data={upload_data}")
+
+        params = {"access_token": self.token, "v": self.api_version}
+        params.update(upload_data)
+        url = f"{self.BASE_URL}docs.save?{urlencode(params)}"
+        async with self.session.post(url) as resp:
+            save_data = await resp.json()
+            logger.info(f"send_file: save_data={save_data}")
+        doc = save_data["response"]["doc"]
+        doc_id = doc["id"]
+        doc_owner_id = doc["owner_id"]
+
+        attachment = f"doc{doc_owner_id}_{doc_id}"
+        params = {
+            "access_token": self.token,
+            "v": self.api_version,
+            "peer_id": peer_id,
+            "attachment": attachment,
+            "random_id": int(time.time() * 1000),
+        }
+        if caption:
+            params["message"] = caption
+        url = f"{self.BASE_URL}messages.send?{urlencode(params)}"
+        async with self.session.get(url) as resp:
+            result = await resp.json()
+        return result[0]["message_id"] if isinstance(result, list) else result
