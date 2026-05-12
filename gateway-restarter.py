@@ -376,8 +376,96 @@ class VKLongPollReloader:
                 await self.vk.send_message(peer_id, help_text)
             except:
                 pass
+        elif command in ("/b", "/branch"):
+            await self._handle_branch_command(peer_id, parts)
         else:
             logger.debug(f"Ignoring message (not /update): '{text}'")
+
+    async def _handle_branch_command(self, peer_id: int, parts: list):
+        """Handle /b or /branch command to checkout a git branch."""
+        if len(parts) < 2:
+            help_text = """
+🔀 Команды переключения веток:
+
+/b <branch> - Переключиться на ветку
+/b <branch> -f - Форсированный чекаут (сбросить изменения)
+
+Если ветка не найдена локально, будет попытка создать из remote.
+"""
+            try:
+                await self.vk.send_message(peer_id, help_text)
+            except:
+                pass
+            return
+
+        branch_name = parts[1]
+        force = len(parts) > 2 and parts[2].lower() == "-f"
+        
+        logger.info(f"Received /branch command: branch={branch_name}, force={force}")
+        
+        def _run_git_command(*args, check=False) -> tuple:
+            """Run a git command and return (success, output)."""
+            try:
+                result = subprocess.run(
+                    ["git"] + list(args),
+                    cwd=str(SCRIPT_DIR),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
+            except subprocess.TimeoutExpired:
+                return False, "Git command timed out"
+            except Exception as e:
+                return False, str(e)
+
+        # Если форс - сбросить все изменения
+        if force:
+            await self.vk.send_message(peer_id, f"🔄 Сброс изменений и форс-чекаут на `{branch_name}`...")
+            success, output = _run_git_command("reset", "--hard", "HEAD")
+            if not success:
+                await self.vk.send_message(peer_id, f"❌ Не удалось сбросить изменения: {output}")
+                return
+            success, output = _run_git_command("clean", "-fd")
+            if not success:
+                logger.warning(f"clean -fd failed (non-critical): {output}")
+        
+        # Сначала попробуем локальный чекаут
+        success, output = _run_git_command("checkout", branch_name)
+        if success:
+            await self.vk.send_message(peer_id, f"✅ Переключено на ветку `{branch_name}`")
+            return
+        
+        # Если ветка не найдена локально - попробуем создать из remote
+        logger.info(f"Branch {branch_name} not found locally, checking remote...")
+        
+        # Сначала обновим remote
+        success, output = _run_git_command("fetch", "--all")
+        if not success:
+            logger.warning(f"fetch failed: {output}")
+        
+        # Попробуем создать ветку из remote
+        success, output = _run_git_command("checkout", "-b", branch_name, f"origin/{branch_name}")
+        if success:
+            await self.vk.send_message(peer_id, f"✅ Создана новая ветка `{branch_name}` из remote")
+            return
+        
+        # Если remote тоже нет - попробуем создать пустую
+        logger.info(f"Remote branch {branch_name} not found either")
+        success, output = _run_git_command("checkout", "-b", branch_name)
+        if success:
+            await self.vk.send_message(peer_id, f"✅ Создана новая локальная ветка `{branch_name}` (remote не найден)")
+            return
+        
+        # Все попытки исчерпаны
+        error_msg = f"❌ Не удалось переключиться на ветку `{branch_name}`\n"
+        if force:
+            error_msg += "Была попытка сбросить изменения.\n"
+        error_msg += f"Ошибки:\n"
+        error_msg += f"  - checkout: {output}\n"
+        error_msg += "Возможно, ветка не существует ни локально, ни на remote."
+        
+        await self.vk.send_message(peer_id, error_msg)
 
     async def run(self):
         self.running = True

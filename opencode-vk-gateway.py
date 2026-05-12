@@ -727,6 +727,12 @@ class VKLongPoll:
             await self._handle_gpu_command(user_id)
             return
 
+        # /b /branch handled by gateway-restarter.py, ignore here
+        parts = text.strip().split()
+        if parts and parts[0].lower() in ("/b", "/branch"):
+            logger.debug(f"Ignoring /b command in gateway (handled by reloader)")
+            return
+
         if user_id in self.waiting_for_answer:
             question_id = self.waiting_for_answer.pop(user_id)
             await self._handle_question_answer(user_id, question_id, text)
