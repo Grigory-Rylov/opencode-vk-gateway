@@ -989,6 +989,14 @@ class VKLongPoll:
                         break
                     elif final_text:
                         break
+                    elif reasoning_parts:
+                        # Send reasoning parts before calling _send_final_message
+                        for rp in reasoning_parts:
+                            logger.info(f"Sending pending reasoning to VK: {rp[:50]}...")
+                            await self._send_long_message(user_id, rp)
+                        reasoning_parts.clear()
+                        await self._send_final_message(user_id, session_id, final_text)
+                        break
                     else:
                         await self._send_final_message(user_id, session_id, final_text)
                         break
@@ -996,6 +1004,13 @@ class VKLongPoll:
                 elif event_type == "message.content":
                     final_text = event.get("all_text", "").strip()
                     if final_text:
+                        # Send reasoning parts first if any
+                        if reasoning_parts:
+                            for rp in reasoning_parts:
+                                logger.info(f"Sending reasoning to VK: {rp[:50]}...")
+                                await self._send_long_message(user_id, rp)
+                            reasoning_parts.clear()
+                        # Then send the final text
                         logger.info(f"Sending message.content to VK: {final_text[:50]}...")
                         await self._send_long_message(user_id, final_text)
                     else:
