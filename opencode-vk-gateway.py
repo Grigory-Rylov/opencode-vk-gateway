@@ -22,6 +22,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, FormData
 
 from shared import VKClient, load_config
+from message_parser import get_new_parts
 
 
 # ---------- Управление процессом OpenCode ----------
@@ -108,7 +109,14 @@ async def restart_llama_server(model: dict, alias: str = None, llama_path: str =
     import subprocess
     import shlex
     import os
-    
+
+    if llama_path is None:
+        llama_path = LLAMA_SERVER_PATH
+
+    if not llama_path:
+        logger.info("llama-server not configured, skipping restart")
+        return True
+
     if not model or not model.get("args"):
         logger.error("No model args provided")
         return False
@@ -280,7 +288,7 @@ THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
 MODEL = CONFIG.get("model")
 MODELS = CONFIG.get("models", [])
 DEFAULT_MODEL = CONFIG.get("default_model")
-LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", "llama-server")
+LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", None)
 MCP_SERVERS = CONFIG.get("mcp_servers", {})
 
 if not VK_TOKEN:
@@ -390,19 +398,29 @@ def model_to_api_format(model: str) -> dict:
 class SessionManager:
     def __init__(self, file_path: Path):
         self.file_path = file_path
-        self.sessions: Dict[int, str] = self._load()
+        self.sessions: Dict[int, str] = {}
+        self.seen_messages: Dict[str, set] = {}  # session_id -> set of message_ids
+        self._load()
 
-    def _load(self) -> Dict[int, str]:
+    def _load(self) -> None:
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return {int(k): v for k, v in data.items()}
+                self.sessions = {int(k): v for k, v in data.get("sessions", {}).items()}
+                self.seen_messages = {
+                    sid: set(ids) for sid, ids in data.get("seen_messages", {}).items()
+                }
         except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+            self.sessions = {}
+            self.seen_messages = {}
 
     def _save(self) -> None:
+        data = {
+            "sessions": {str(k): v for k, v in self.sessions.items()},
+            "seen_messages": {sid: list(ids) for sid, ids in self.seen_messages.items()}
+        }
         with open(self.file_path, "w", encoding="utf-8") as f:
-            json.dump({str(k): v for k, v in self.sessions.items()}, f, indent=2)
+            json.dump(data, f, indent=2)
 
     async def get_or_create(self, user_id: int) -> str:
         if user_id in self.sessions:
@@ -415,13 +433,28 @@ class SessionManager:
                 resp_data = await resp.json()
                 session_id = resp_data["id"]
                 self.sessions[user_id] = session_id
+                if session_id not in self.seen_messages:
+                    self.seen_messages[session_id] = set()
                 self._save()
                 logger.info(f"Created OpenCode session {session_id} for user {user_id} with model {MODEL}")
                 return session_id
 
+    def get_seen_messages(self, session_id: str) -> set:
+        return self.seen_messages.get(session_id, set())
+
+    def add_seen_message(self, session_id: str, message_id: str):
+        if session_id not in self.seen_messages:
+            self.seen_messages[session_id] = set()
+        self.seen_messages[session_id].add(message_id)
+        logger.info(f"Saved seen message {message_id} to file for session {session_id}")
+        self._save()
+
     def remove(self, user_id: int):
         if user_id in self.sessions:
+            session_id = self.sessions[user_id]
             del self.sessions[user_id]
+            if session_id in self.seen_messages:
+                del self.seen_messages[session_id]
             self._save()
             logger.info(f"Removed session for user {user_id}")
 
@@ -749,7 +782,7 @@ class VKLongPoll:
         logger.info(f"Sending history for session {session_id} to user {user_id}")
         try:
             async with ClientSession() as session:
-                url = f"{OPENCODE_URL}/session/{session_id}/message"
+                url = f"{OPENCODE_URL}/session/{session_id}/message?limit=20"
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         logger.error(f"Failed to get history: {resp.status}")
@@ -939,44 +972,73 @@ class VKLongPoll:
         self, user_id: int, session_id: str, initial_text: str = ""
     ):
         event_queue = asyncio.Queue()
-        monitor_task = asyncio.create_task(
-            self._monitor_sse(user_id, session_id, event_queue)
-        )
+        seen_part_ids: set = self.session_mgr.get_seen_messages(session_id)
+        logger.info(f"Loaded {len(seen_part_ids)} seen parts from file")
+        
+        if initial_text:
+            async with ClientSession(timeout=ClientTimeout(total=30)) as oc_session:
+                async with oc_session.get(f"{OPENCODE_URL}/session/{session_id}/message?limit=20") as resp:
+                    if resp.status == 200:
+                        messages = await resp.json()
+                        for msg in messages:
+                            for part in msg.get("parts", []):
+                                part_id = part.get("id", "")
+                                if part_id:
+                                    seen_part_ids.add(part_id)
+                        logger.info(f"After loading current: {len(seen_part_ids)} parts")
+
         final_text = None
         question_asked = False
+        reasoning_parts: List[str] = []
+
+        async with ClientSession(timeout=ClientTimeout(total=30)) as oc_session:
+            if initial_text:
+                url = f"{OPENCODE_URL}/session/{session_id}/prompt_async"
+                data = {"parts": [{"type": "text", "text": initial_text}]}
+                async with oc_session.post(url, json=data) as resp:
+                    if resp.status != 204:
+                        logger.error(f"prompt_async failed: {resp.status}")
+                        await self.vk.send_message(
+                            user_id, "❌ Ошибка запуска обработки"
+                        )
+                        return
+                    logger.info(f"prompt_async sent for {session_id}")
+
+        monitor_task = asyncio.create_task(
+            self._poll_messages(user_id, session_id, event_queue, seen_part_ids)
+        )
 
         try:
             await asyncio.sleep(0.5)
-
-            if initial_text:
-                async with ClientSession() as session:
-                    url = f"{OPENCODE_URL}/session/{session_id}/prompt_async"
-                    data = {"parts": [{"type": "text", "text": initial_text}]}
-                    async with session.post(url, json=data) as resp:
-                        if resp.status != 204:
-                            logger.error(f"prompt_async failed: {resp.status}")
-                            await self.vk.send_message(
-                                user_id, "❌ Ошибка запуска обработки"
-                            )
-                            return
-                    logger.info(f"prompt_async sent for {session_id}")
 
             while True:
                 event = await event_queue.get()
                 event_type = event.get("type")
                 logger.info(f"Processing event: {event_type} for session {session_id}")
 
-                if event_type == "question.asked":
-                    await self._show_question(user_id, event)
-                    question_asked = True
-                    break
-                # Handle session completion - send response in parts if needed
-                elif event_type in ("session.idle", "session.completed"):
+                if event_type == "check.question":
+                    question = await self._check_pending_question(session_id)
+                    if question:
+                        await self._show_question(user_id, question)
+                        question_asked = True
+                        break
+                    elif final_text:
+                        break
+                    else:
+                        await self._send_final_message(user_id, session_id, final_text)
+                        break
+
+                elif event_type == "message.content":
+                    final_text = event.get("all_text", "").strip()
                     if final_text:
+                        logger.info(f"Sending message.content to VK: {final_text[:50]}...")
                         await self._send_long_message(user_id, final_text)
                     else:
-                        await self._send_final_message(user_id, session_id)
-                    break
+                        logger.info("Skipping empty message.content")
+
+                elif event_type == "reasoning.content":
+                    reasoning_parts.extend(event.get("reasoning_parts", []))
+
                 elif event_type == "session.error":
                     props = event.get("properties", {})
                     error = props.get("error", {})
@@ -986,37 +1048,15 @@ class VKLongPoll:
                     logger.error(f"Session error: {error_name} - {error_message}")
                     if "null bytes" in error_message.lower():
                         await self.vk.send_message(
-                            user_id, 
+                            user_id,
                             "❌ Ошибка OpenCode: повреждён кеш snapshot.\n"
                             "Выполните в терминале: `rm -rf ~/.local/share/opencode/snapshot/` и попробуйте снова."
                         )
                     else:
                         await self.vk.send_message(
-                            user_id, 
+                            user_id,
                             f"❌ Ошибка сессии: {error_name}\n{error_message[:200]}"
                         )
-                    break
-                elif event_type == "message.part.updated":
-                    part = event.get("properties", {}).get("part", {})
-                    part_type = part.get("type")
-                    if part_type == "reasoning" and part.get("text"):
-                        reasoning_text = part["text"]
-                        logger.info(f"Got reasoning: {reasoning_text[:100]}...")
-                        if THINKING_PEER_ID:
-                            try:
-                                await self.vk.send_message(
-                                    THINKING_PEER_ID,
-                                    f"🧠 Рассуждение:\n{reasoning_text}",
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to send reasoning to thinking chat: {e}"
-                                )
-                    elif part_type == "text" and part.get("text"):
-                        final_text = part["text"]
-                elif event_type == "error":
-                    logger.error(f"SSE error: {event}")
-                    await self.vk.send_message(user_id, "❌ OpenCode error")
                     break
 
         except asyncio.CancelledError:
@@ -1038,105 +1078,144 @@ class VKLongPoll:
                     f"Question asked, waiting for user reply on session {session_id}"
                 )
 
-    async def _monitor_sse(
-        self, user_id: int, session_id: str, event_queue: asyncio.Queue
+    async def _poll_messages(
+        self, user_id: int, session_id: str, event_queue: asyncio.Queue,
+        seen_part_ids: set
     ):
-        logger.info(f"Starting SSE monitor for session {session_id}")
+        """
+        Polls OpenCode session for new messages using GET /session/:id/message.
+        Tracks seen messages by message.info.id and parts by part.info.id.
+        """
+        logger.info(f"Starting message poller for session {session_id}")
+        poll_interval = 4
+        max_silence_seconds = 120
+        last_new_content_time = time.time()
+
         try:
-            async with ClientSession(timeout=ClientTimeout(total=None)) as session:
-                url = f"{OPENCODE_URL}/event"
-                async with session.get(url) as resp:
-                    logger.info(f"SSE connection established, status={resp.status}")
-                    async for line in resp.content:
-                        if not line.startswith(b"data:"):
-                            continue
-                        data_str = line[5:].strip().decode()
-                        if not data_str:
-                            continue
-                        try:
-                            event = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            logger.warning(f"Failed to parse SSE data: {data_str}")
-                            continue
+            while True:
+                try:
+                    async with ClientSession(timeout=ClientTimeout(total=30)) as session:
+                        url = f"{OPENCODE_URL}/session/{session_id}/message?limit=20"
+                        async with session.get(url) as resp:
+                            if resp.status != 200:
+                                logger.warning(f"Poll got status {resp.status}, retrying...")
+                                await asyncio.sleep(poll_interval)
+                                continue
+                            messages = await resp.json()
 
-                        logger.info(f"SSE raw event: {event}")
+                        new_texts, new_reasonings = get_new_parts(messages, seen_part_ids)
+                        
+                        all_text_parts = new_texts
+                        new_parts = new_texts
+                        new_reasoning = new_reasonings
+                        
+                        for msg in messages:
+                            for part in msg.get("parts", []):
+                                part_id = part.get("id", "")
+                                if part_id and part_id not in seen_part_ids:
+                                    seen_part_ids.add(part_id)
+                                    self.session_mgr.add_seen_message(session_id, part_id)
+                        
+                        if new_texts or new_reasonings:
+                            last_new_content_time = time.time()
+                            logger.info(f"Found {len(new_texts)} new texts, {len(new_reasonings)} reasonings")
+                        
+                        if new_reasonings and THINKING_PEER_ID:
+                            logger.info(f"DEBUG: Sending {len(new_reasonings)} reasonings to {THINKING_PEER_ID}")
+                            for rt in new_reasonings:
+                                try:
+                                    await self.vk.send_message(
+                                        THINKING_PEER_ID,
+                                        f"🧠 Рассуждение:\n{rt}",
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Failed to send reasoning: {e}")
 
-                        event_session = event.get("properties", {}).get("sessionID")
-                        if event_session != session_id:
-                            continue
+                        logger.info(f"Poll: new_parts={len(new_parts)}, all_text_parts={len(all_text_parts)}, new_reasoning={len(new_reasoning)}")
+                        if new_reasonings:
+                            logger.info(f"DEBUG: reasonings to send: {new_reasonings[:2]}...")
+                        if new_parts:
+                            logger.info(f"Putting message.content in queue with text: {all_text_parts[:100]}...")
+                            event_queue.put_nowait({
+                                "type": "message.content",
+                                "text_parts": new_parts,
+                                "all_text": "\n".join(all_text_parts)
+                            })
 
-                        event_type = event.get("type")
-                        if event_type == "permission.asked":
-                            props = event.get("properties", {})
-                            permission_id = props.get("id")
-                            permission_type = props.get("permission")
-                            patterns = props.get("patterns", [])
-                            path = ", ".join(patterns) if patterns else "не указан"
-                            logger.info(f"Permission requested: {permission_id}, type={permission_type}, path={path}")
+                        if new_reasoning:
+                            event_queue.put_nowait({
+                                "type": "reasoning.content",
+                                "reasoning_parts": new_reasoning
+                            })
 
-                            self.pending_permissions[permission_id] = (session_id, user_id)
-
-                            buttons = [
-                                [
-                                    {
-                                        "action": {
-                                            "type": "text",
-                                            "label": "✅ Разрешить",
-                                            "payload": json.dumps({"permission_id": permission_id, "action": "allow"}),
-                                        },
-                                        "color": "positive",
-                                    },
-                                    {
-                                        "action": {
-                                            "type": "text",
-                                            "label": "❌ Отказать",
-                                            "payload": json.dumps({"permission_id": permission_id, "action": "deny"}),
-                                        },
-                                        "color": "negative",
-                                    },
-                                ]
-                            ]
-
-                            keyboard = {
-                                "inline": True,
-                                "buttons": buttons,
-                            }
-
-                            await self.vk.send_message(
-                                user_id,
-                                f"🔒 Запрос разрешения на доступ:\n"
-                                f"Тип: {permission_type}\n"
-                                f"Путь: {path}",
-                                keyboard=keyboard
+                        silence_duration = time.time() - last_new_content_time
+                        if silence_duration > max_silence_seconds:
+                            has_user_msg = any(
+                                m.get("info", {}).get("role") == "user"
+                                for m in messages[-3:]
                             )
-                            continue
+                            if has_user_msg:
+                                logger.info(f"Silence timeout, user message found - stopping")
+                                if new_parts:
+                                    logger.info(f"Flushing pending {len(new_parts)} parts before stop")
+                                    event_queue.put_nowait({
+                                        "type": "message.content",
+                                        "text_parts": new_parts,
+                                        "all_text": "\n".join(all_text_parts)
+                                    })
+                                break
+                            logger.info(f"Silence timeout ({silence_duration:.1f}s), continuing to wait...")
 
-                        await event_queue.put(event)
+                        await asyncio.sleep(poll_interval)
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Poll error: {e}, retrying...")
+                    await asyncio.sleep(poll_interval)
+
         except asyncio.CancelledError:
-            logger.info(f"SSE monitor cancelled for {session_id}")
+            logger.info(f"Poller cancelled for {session_id}")
             raise
-        except aiohttp.ClientPayloadError:
-            logger.info(f"SSE connection closed for {session_id}")
-        except Exception as e:
-            logger.exception(f"SSE monitor error for {session_id}: {e}")
 
-    async def _show_question(self, user_id: int, event: dict):
-        props = event.get("properties", {})
-        questions = props.get("questions", [])
-        if not questions:
-            logger.error("No questions in event")
+    async def _show_question(self, user_id: int, question_data: dict):
+        question_id = question_data.get("id") or question_data.get("question_id")
+        if not question_id:
+            logger.error("No question_id in question_data")
             return
-        question = questions[0]
-        question_id = props["id"]
 
         self.waiting_for_answer[user_id] = question_id
 
+        header = question_data.get("header", "Вопрос")
+        question_text = question_data.get("question", question_data.get("text", ""))
+        options = question_data.get("options", [])
+
         await self.vk.send_question_keyboard(
             peer_id=user_id,
-            header=question["header"],
-            question_text=question["question"],
-            options=question["options"],
+            header=header,
+            question_text=question_text,
+            options=options,
         )
+
+    async def _check_pending_question(self, session_id: str) -> Optional[dict]:
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+                async with session.get(f"{OPENCODE_URL}/question") as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Failed to get questions: {resp.status}")
+                        return None
+                    questions = await resp.json()
+                    if not questions:
+                        return None
+                    for q in questions:
+                        q_session_id = q.get("sessionID") or q.get("session_id")
+                        if q_session_id == session_id:
+                            logger.info(f"Found pending question for session {session_id}: {q.get('id')}")
+                            return q
+                    return None
+        except Exception as e:
+            logger.warning(f"Error checking pending questions: {e}")
+            return None
 
     async def _send_permission_response(self, permission_id: str, allowed: bool, session_id: str):
         async with ClientSession() as session:
@@ -1167,9 +1246,13 @@ class VKLongPoll:
                     logger.error(f"Failed to reply: {resp.status}")
                     await self.vk.send_message(user_id, "❌ Ошибка отправки ответа")
 
-    async def _send_final_message(self, user_id: int, session_id: str):
+    async def _send_final_message(self, user_id: int, session_id: str, final_text: str = None):
+        if final_text and final_text.strip():
+            await self._send_long_message(user_id, final_text.strip())
+            return
+
         async with ClientSession() as session:
-            url = f"{OPENCODE_URL}/session/{session_id}/message"
+            url = f"{OPENCODE_URL}/session/{session_id}/message?limit=20"
             async with session.get(url) as resp:
                 if resp.status != 200:
                     logger.error(f"Failed to get messages: {resp.status}")
@@ -1187,14 +1270,13 @@ class VKLongPoll:
                         break
                 if not assistant_msg:
                     logger.warning("No assistant message found")
-                    await self.vk.send_message(user_id, "⚠️ Нет ответа от opencode")
                     return
                 text = ""
                 for part in assistant_msg.get("parts", []):
                     if part.get("type") in ("text", "reasoning"):
                         text += part.get("text", "")
                 if text:
-                    await self.vk.send_message(user_id, text)
+                    await self._send_long_message(user_id, text)
                 else:
                     logger.warning("Assistant message has no text content")
                     await self.vk.send_message(user_id, "⚠️ Пустой ответ от opencode")

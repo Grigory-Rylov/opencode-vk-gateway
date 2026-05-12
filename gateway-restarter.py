@@ -41,6 +41,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_SCRIPT = SCRIPT_DIR / "opencode-vk-gateway.py"
 PID_FILE = SCRIPT_DIR / ".gateway.pid"
 
+LLAMA_SERVER_PORT = 8081
+
 # Пути к версиям скрипта для запуска (приоритет: v1 -> v0 -> корень)
 SCRIPT_VERSIONS = [
     SCRIPT_DIR / "v1.py",
@@ -135,6 +137,66 @@ def is_process_running(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def is_llama_server_running() -> bool:
+    """Проверяет, запущен ли llama-server на порту LLAMA_SERVER_PORT."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-i", f":{LLAMA_SERVER_PORT}"],
+            capture_output=True
+        )
+        return result.returncode == 0
+    except Exception as e:
+        logger.warning(f"Failed to check llama-server status: {e}")
+        return False
+
+
+class LlamaServerMonitor:
+    """Мониторит состояние llama-server и уведомляет при падении."""
+
+    def __init__(self, vk: 'VKClient', check_interval: int = 30):
+        self.vk = vk
+        self.check_interval = check_interval
+        self._was_running = False
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self):
+        self._running = True
+        logger.info(f"LlamaServerMonitor started (interval={self.check_interval}s)")
+
+    async def check_loop(self, notify_peer_id: int):
+        """Основной цикл проверки llama-server."""
+        self.start()
+
+        while self._running:
+            await asyncio.sleep(self.check_interval)
+
+            if not self._running:
+                break
+
+            is_running = is_llama_server_running()
+
+            if self._was_running and not is_running:
+                logger.warning("Llama-server is down!")
+                try:
+                    await self.vk.send_message(
+                        notify_peer_id,
+                        "⚠️ Llama-server упал!"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send llama-server down notification: {e}")
+
+            self._was_running = is_running
+            logger.debug(f"Llama-server check: running={is_running}")
+
+    def stop(self):
+        self._running = False
+        logger.info("LlamaServerMonitor stopped")
 
 
 def restart_gateway(version: str = None):
@@ -394,11 +456,19 @@ async def main():
         except Exception as e:
             logger.warning(f"Failed to send startup notification: {e}")
 
+        monitor = LlamaServerMonitor(vk, check_interval=30)
+        monitor_task = asyncio.create_task(monitor.check_loop(notify_peer_id))
+
         poller = VKLongPollReloader(vk)
         try:
             await poller.run()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("Shutting down...")
+            monitor.stop()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
             await poller.stop()
 
 
