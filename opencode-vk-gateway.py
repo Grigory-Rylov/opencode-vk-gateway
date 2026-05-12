@@ -990,10 +990,10 @@ class VKLongPoll:
                     elif final_text:
                         break
                     elif reasoning_parts:
-                        # Send reasoning parts before calling _send_final_message
+                        target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
                         for rp in reasoning_parts:
-                            logger.info(f"Sending pending reasoning to VK: {rp[:50]}...")
-                            await self._send_long_message(user_id, rp)
+                            logger.info(f"Sending pending reasoning to {target_peer}: {rp[:50]}...")
+                            await self._send_long_message(target_peer, rp)
                         reasoning_parts.clear()
                         await self._send_final_message(user_id, session_id, final_text)
                         break
@@ -1006,9 +1006,10 @@ class VKLongPoll:
                     if final_text:
                         # Send reasoning parts first if any
                         if reasoning_parts:
+                            target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
                             for rp in reasoning_parts:
-                                logger.info(f"Sending reasoning to VK: {rp[:50]}...")
-                                await self._send_long_message(user_id, rp)
+                                logger.info(f"Sending reasoning to {target_peer}: {rp[:50]}...")
+                                await self._send_long_message(target_peer, rp)
                             reasoning_parts.clear()
                         # Then send the final text
                         logger.info(f"Sending message.content to VK: {final_text[:50]}...")
@@ -1085,14 +1086,43 @@ class VKLongPoll:
 
                         new_texts, new_reasonings = get_new_parts(messages, seen_part_ids)
                         
+                        # Собираем IDs новых частей для логирования
+                        new_text_ids = []
+                        new_reasoning_ids = []
+                        for msg in messages:
+                            if "info" in msg and "parts" in msg:
+                                msg_parts = msg.get("parts", [])
+                            else:
+                                msg_parts = [msg]
+                            for part in msg_parts:
+                                part_id = part.get("id", "")
+                                part_text = part.get("text")
+                                part_type = part.get("type", "")
+                                if part_type == "text" and part_text and part_text in new_texts:
+                                    new_text_ids.append(part_id)
+                                elif part_type == "reasoning" and part_text and part_text in new_reasonings:
+                                    new_reasoning_ids.append(part_id)
+                        
+                        logger.info(f"New texts: {len(new_texts)}, reasonings: {len(new_reasonings)}")
+                        if new_text_ids:
+                            logger.info(f"New text part IDs: {new_text_ids}")
+                        if new_reasoning_ids:
+                            logger.info(f"New reasoning part IDs: {new_reasoning_ids}")
+                        
                         all_text_parts = new_texts
                         new_parts = new_texts
                         new_reasoning = new_reasonings
                         
+                        # Обновляем seen_part_ids (поддержка обоих форматов)
                         for msg in messages:
-                            for part in msg.get("parts", []):
+                            if "info" in msg and "parts" in msg:
+                                msg_parts = msg.get("parts", [])
+                            else:
+                                msg_parts = [msg]
+                            for part in msg_parts:
                                 part_id = part.get("id", "")
                                 if part_id and part_id not in seen_part_ids:
+                                    logger.debug(f"Adding new part_id to seen: {part_id}")
                                     seen_part_ids.add(part_id)
                                     self.session_mgr.add_seen_message(session_id, part_id)
                         
@@ -1100,16 +1130,27 @@ class VKLongPoll:
                             last_new_content_time = time.time()
                             logger.info(f"Found {len(new_texts)} new texts, {len(new_reasonings)} reasonings")
                         
-                        if new_reasonings and THINKING_PEER_ID:
-                            logger.info(f"DEBUG: Sending {len(new_reasonings)} reasonings to {THINKING_PEER_ID}")
+                        # Отправляем reasoning в VK
+                        if new_reasonings:
+                            target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
+                            logger.info(f"Sending {len(new_reasonings)} reasonings to {target_peer}")
                             for rt in new_reasonings:
                                 try:
                                     await self.vk.send_message(
-                                        THINKING_PEER_ID,
+                                        target_peer,
                                         f"🧠 Рассуждение:\n{rt}",
                                     )
                                 except Exception as e:
                                     logger.warning(f"Failed to send reasoning: {e}")
+                        
+                        # Отправляем текстовые части в VK
+                        if new_texts:
+                            logger.info(f"Sending {len(new_texts)} text parts to user {user_id}")
+                            for text_part in new_texts:
+                                try:
+                                    await self.vk.send_message(user_id, text_part)
+                                except Exception as e:
+                                    logger.warning(f"Failed to send text part: {e}")
 
                         logger.info(f"Poll: new_parts={len(new_parts)}, all_text_parts={len(all_text_parts)}, new_reasoning={len(new_reasoning)}")
                         if new_reasonings:
