@@ -1265,7 +1265,8 @@ class VKLongPoll:
                     return
                 assistant_msg = None
                 for msg in reversed(messages):
-                    if msg.get("role") == "assistant":
+                    info = msg.get("info", {})
+                    if info.get("role") == "assistant":
                         assistant_msg = msg
                         break
                 if not assistant_msg:
