@@ -22,6 +22,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, FormData
 
 from shared import VKClient, load_config
+from shared.nvidia import get_gpu_info_vk_message
 from message_parser import get_new_parts
 
 
@@ -897,54 +898,12 @@ class VKLongPoll:
         await self.vk.send_message(user_id, f"📋 **Список сессий**:\n\n{sessions_text}")
 
     async def _handle_gpu_command(self, user_id: int):
-        """Execute nvidia-smi and return GPU information."""
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "nvidia-smi",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=30,
-            )
-            
-            if process.returncode == 0:
-                output = stdout.decode("utf-8", errors="replace")
-                await self.vk.send_message(user_id, output)
-            else:
-                error = stderr.decode("utf-8", errors="replace")
-                await self.vk.send_message(
-                    user_id,
-                    f"❌ Ошибка при выполнении nvidia-smi (код {process.returncode}):\n"
-                    f"{error[:2000]}"
-                )
-        except asyncio.TimeoutError:
-            await self.vk.send_message(
-                user_id,
-                "⏱️ Истекло время ожидания nvidia-smi\n"
-                "Возможная причина: ошибка драйвера NVIDIA\n"
-                "Попробуйте проверить: nvidia-smi -q или dmesg | grep nvidia"
-            )
-        except FileNotFoundError:
-            await self.vk.send_message(
-                user_id,
-                "❌ nvidia-smi не найден. Установите NVIDIA драйверы."
-            )
-        except Exception as e:
-            error_msg = str(e)
-            if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                await self.vk.send_message(
-                    user_id,
-                    "⏱️ Команда nvidia-smi зависла\n"
-                    "Возможная причина: ошибка драйвера NVIDIA\n"
-                    "Попробуйте проверить: dmesg | grep nvidia"
-                )
-            else:
-                await self.vk.send_message(
-                    user_id,
-                    f"❌ Ошибка: {error_msg[:2000]}"
-                )
+        """Get GPU information using shared/nvidia.py parser."""
+        message, error = await get_gpu_info_vk_message(timeout=30)
+        if message:
+            await self.vk.send_message(user_id, message)
+        else:
+            await self.vk.send_message(user_id, error)
 
     async def _send_help(self, user_id: int):
         help_text = """
