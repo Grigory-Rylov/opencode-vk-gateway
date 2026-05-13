@@ -285,6 +285,7 @@ OPENCODE_URL = CONFIG["opencode_url"]
 SESSION_FILE = Path(CONFIG["session_file"])
 VK_API_VERSION = CONFIG["vk_api_version"]
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
+PEER_ID = CONFIG.get("peer_id")
 THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
 MODEL = CONFIG.get("model")
 MODELS = CONFIG.get("models", [])
@@ -937,20 +938,6 @@ class VKLongPoll:
         self, user_id: int, session_id: str, initial_text: str = ""
     ):
         event_queue = asyncio.Queue()
-        seen_part_ids: set = self.session_mgr.get_seen_messages(session_id)
-        logger.info(f"Loaded {len(seen_part_ids)} seen parts from file")
-        
-        if initial_text:
-            async with ClientSession(timeout=ClientTimeout(total=30)) as oc_session:
-                async with oc_session.get(f"{OPENCODE_URL}/session/{session_id}/message?limit=20") as resp:
-                    if resp.status == 200:
-                        messages = await resp.json()
-                        for msg in messages:
-                            for part in msg.get("parts", []):
-                                part_id = part.get("id", "")
-                                if part_id:
-                                    seen_part_ids.add(part_id)
-                        logger.info(f"After loading current: {len(seen_part_ids)} parts")
 
         final_text = None
         question_asked = False
@@ -970,7 +957,7 @@ class VKLongPoll:
                     logger.info(f"prompt_async sent for {session_id}")
 
         monitor_task = asyncio.create_task(
-            self._poll_messages(user_id, session_id, event_queue, seen_part_ids)
+            self._poll_messages(user_id, session_id, event_queue)
         )
 
         try:
@@ -1060,8 +1047,10 @@ class VKLongPoll:
                 )
 
     async def _poll_messages(
-        self, user_id: int, session_id: str, event_queue: asyncio.Queue,
-        seen_part_ids: set
+        self,
+        user_id: int,
+        session_id: str,
+        event_queue: asyncio.Queue,
     ):
         """
         Polls OpenCode session for new messages using GET /session/:id/message.
@@ -1069,123 +1058,81 @@ class VKLongPoll:
         """
         logger.info(f"Starting message poller for session {session_id}")
         poll_interval = 4
+        target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
+
         max_silence_seconds = 120
         last_new_content_time = time.time()
+
+        if session_id not in self.session_mgr.seen_messages:
+            self.session_mgr.seen_messages[session_id] = set()
 
         try:
             while True:
                 try:
-                    async with ClientSession(timeout=ClientTimeout(total=30)) as session:
+                    async with ClientSession(
+                        timeout=ClientTimeout(total=30)
+                    ) as session:
                         url = f"{OPENCODE_URL}/session/{session_id}/message?limit=20"
                         async with session.get(url) as resp:
                             if resp.status != 200:
-                                logger.warning(f"Poll got status {resp.status}, retrying...")
+                                logger.warning(
+                                    f"Poll got status {resp.status}, retrying..."
+                                )
                                 await asyncio.sleep(poll_interval)
                                 continue
                             messages = await resp.json()
 
-                        new_texts, new_reasonings = get_new_parts(messages, seen_part_ids)
-                        
-                        # Собираем IDs новых частей для логирования
-                        new_text_ids = []
-                        new_reasoning_ids = []
-                        for msg in messages:
-                            if "info" in msg and "parts" in msg:
-                                msg_parts = msg.get("parts", [])
-                            else:
-                                msg_parts = [msg]
-                            for part in msg_parts:
-                                part_id = part.get("id", "")
-                                part_text = part.get("text")
-                                part_type = part.get("type", "")
-                                if part_type == "text" and part_text and part_text in new_texts:
-                                    new_text_ids.append(part_id)
-                                elif part_type == "reasoning" and part_text and part_text in new_reasonings:
-                                    new_reasoning_ids.append(part_id)
-                        
-                        logger.info(f"New texts: {len(new_texts)}, reasonings: {len(new_reasonings)}")
-                        if new_text_ids:
-                            logger.info(f"New text part IDs: {new_text_ids}")
-                        if new_reasoning_ids:
-                            logger.info(f"New reasoning part IDs: {new_reasoning_ids}")
-                        
-                        all_text_parts = new_texts
-                        new_parts = new_texts
-                        new_reasoning = new_reasonings
-                        
-                        # Обновляем seen_part_ids (поддержка обоих форматов)
-                        for msg in messages:
-                            if "info" in msg and "parts" in msg:
-                                msg_parts = msg.get("parts", [])
-                            else:
-                                msg_parts = [msg]
-                            for part in msg_parts:
-                                part_id = part.get("id", "")
-                                if part_id and part_id not in seen_part_ids:
-                                    logger.debug(f"Adding new part_id to seen: {part_id}")
-                                    seen_part_ids.add(part_id)
-                                    self.session_mgr.add_seen_message(session_id, part_id)
-                        
-                        if new_texts or new_reasonings:
-                            last_new_content_time = time.time()
-                            logger.info(f"Found {len(new_texts)} new texts, {len(new_reasonings)} reasonings")
-                        
-                        # Отправляем reasoning в VK
-                        if new_reasonings:
-                            target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
-                            logger.info(f"Sending {len(new_reasonings)} reasonings to {target_peer}")
-                            for rt in new_reasonings:
+                        new_parts = get_new_parts(
+                            messages, self.session_mgr.seen_messages[session_id]
+                        )
+                        logger.debug(f"================ new_parts = {new_parts}")
+
+                        # Цикл по каждой новой части
+                        for part in new_parts:
+                            part_id = part.id
+                            part_type = part.type
+                            part_text = part.text
+
+                            if not part_text.strip():
+                                continue
+
+                            # Делаем что-то с данными
+                            logger.debug(f"ID: {part_id}")
+                            logger.debug(f"Type: {part_type}")
+                            logger.debug(
+                                f"Text: {part_text[:100]}..."
+                            )  # обрезаем для примера
+                            logger.debug("-" * 40)
+
+                            # Например, добавить ID в множество обработанных
+                            self.session_mgr.add_seen_message(session_id, part_id)
+
+                            # Можно также обрабатывать по типу
+                            if part_type == "tool":
+                                # Логика для инструментов
                                 try:
                                     await self.vk.send_message(
                                         target_peer,
-                                        f"🧠 Рассуждение:\n{rt}",
+                                        f"🧠: Tool \n{part_text}",
                                     )
                                 except Exception as e:
                                     logger.warning(f"Failed to send reasoning: {e}")
-                        
-                        # Отправляем текстовые части в VK
-                        if new_texts:
-                            logger.info(f"Sending {len(new_texts)} text parts to user {user_id}")
-                            for text_part in new_texts:
+                            elif part_type == "reasoning":
+                                # Логика для рассуждений
                                 try:
-                                    await self.vk.send_message(user_id, text_part)
+                                    await self.vk.send_message(
+                                        target_peer,
+                                        f"🧠: \n{part_text}",
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Failed to send reasoning: {e}")
+
+                            else:  # text
+                                # Обычный текстовый ответ
+                                try:
+                                    await self.vk.send_message(user_id, part_text)
                                 except Exception as e:
                                     logger.warning(f"Failed to send text part: {e}")
-
-                        logger.info(f"Poll: new_parts={len(new_parts)}, all_text_parts={len(all_text_parts)}, new_reasoning={len(new_reasoning)}")
-                        if new_reasonings:
-                            logger.info(f"DEBUG: reasonings to send: {new_reasonings[:2]}...")
-                        if new_parts:
-                            logger.info(f"Putting message.content in queue with text: {all_text_parts[:100]}...")
-                            event_queue.put_nowait({
-                                "type": "message.content",
-                                "text_parts": new_parts,
-                                "all_text": "\n".join(all_text_parts)
-                            })
-
-                        if new_reasoning:
-                            event_queue.put_nowait({
-                                "type": "reasoning.content",
-                                "reasoning_parts": new_reasoning
-                            })
-
-                        silence_duration = time.time() - last_new_content_time
-                        if silence_duration > max_silence_seconds:
-                            has_user_msg = any(
-                                m.get("info", {}).get("role") == "user"
-                                for m in messages[-3:]
-                            )
-                            if has_user_msg:
-                                logger.info(f"Silence timeout, user message found - stopping")
-                                if new_parts:
-                                    logger.info(f"Flushing pending {len(new_parts)} parts before stop")
-                                    event_queue.put_nowait({
-                                        "type": "message.content",
-                                        "text_parts": new_parts,
-                                        "all_text": "\n".join(all_text_parts)
-                                    })
-                                break
-                            logger.info(f"Silence timeout ({silence_duration:.1f}s), continuing to wait...")
 
                         await asyncio.sleep(poll_interval)
 
@@ -1416,8 +1363,10 @@ async def main():
         # Отправляем сообщение о старте
         try:
             await vk.send_message(
-                5156890,
-                "🤖 OpenCode VK Gateway запущен\n\nModel: {}\nWorkdir: {}".format(MODEL, SCRIPT_DIR)
+                PEER_ID,
+                "🤖 OpenCode VK Gateway запущен\n\nModel: {}\nWorkdir: {}".format(
+                    MODEL, SCRIPT_DIR
+                ),
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")
