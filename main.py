@@ -596,6 +596,12 @@ class VKLongPoll:
         if text.strip() == "/clearsessions":
             if SESSION_FILE.exists():
                 SESSION_FILE.unlink()
+                # Очищаем in-memory словари, иначе /sessions покажет старые данные
+                self.session_mgr.sessions.clear()
+                self.session_mgr.seen_messages.clear()
+                self.vk.pending_permissions.clear()
+                self.vk.seen_permissions.clear()
+                self.vk.seen_questions.clear()
                 await self.vk.send_message(user_id, "✅ Сессии удалены")
             else:
                 await self.vk.send_message(user_id, "ℹ️ Файл sessions.json не найден")
@@ -663,6 +669,10 @@ class VKLongPoll:
                 return
 
         # Обычное сообщение пользователя
+        # Игнорируем сообщения из thinking_peer_id — это чат для рассуждений, не для промптов
+        if THINKING_PEER_ID and peer_id == THINKING_PEER_ID:
+            logger.debug(f"Ignoring message from thinking_peer_id {peer_id}")
+            return
         full_msgs = await self.vk.get_messages_by_ids([msg_id])
         if not full_msgs:
             return
