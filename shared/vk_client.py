@@ -1,15 +1,16 @@
 """
 VK Client - обёртка для VK API
+Поддерживает как GET, так и POST методы для отправки сообщений,
+а также клавиатуры, файлы и вопросные клавиатуры.
 """
+
 import json
+import logging
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlencode
 
-import logging
-
-import aiohttp
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientSession, ClientTimeout, FormData
 
 logger = logging.getLogger("vk-opencode")
 
@@ -31,6 +32,7 @@ class VKClient:
             await self.session.close()
 
     async def _api_request(self, method: str, params: dict) -> dict:
+        """Базовый GET-запрос к VK API (используется для получения данных)."""
         params["access_token"] = self.token
         params["v"] = self.api_version
         url = f"{self.BASE_URL}{method}?{urlencode(params)}"
@@ -40,11 +42,11 @@ class VKClient:
                 raise Exception(f"VK API error: {data['error']}")
             return data["response"]
 
-    async def get_long_poll_server(self) -> tuple[str, str, int]:
+    async def get_long_poll_server(self) -> Tuple[str, str, int]:
         resp = await self._api_request("messages.getLongPollServer", {})
         return resp["server"], resp["key"], int(resp["ts"])
 
-    async def get_messages_by_ids(self, msg_ids: list[int]) -> list[dict]:
+    async def get_messages_by_ids(self, msg_ids: List[int]) -> List[dict]:
         ids_str = ",".join(str(i) for i in msg_ids)
         resp = await self._api_request("messages.getById", {"message_ids": ids_str})
         return resp.get("items", [])
@@ -56,7 +58,7 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
-        """Send message using GET request (legacy, may fail with long messages)."""
+        """Отправка сообщения методом GET (классический способ, но может давать ошибку 414 при длинном URI)."""
         params = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -78,7 +80,7 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
-        """Send message using POST request (supports longer messages, avoids 414 errors)."""
+        """Отправка сообщения методом POST (рекомендуется для длинных сообщений)."""
         payload = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -98,21 +100,43 @@ class VKClient:
             if "error" in data:
                 raise Exception(f"VK API error: {data['error']}")
             resp_data = data["response"]
-            return resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
+            return (
+                resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
+            )
 
-    async def send_keyboard(
-       self, peer_id: int, text: str, buttons: list
+    async def send_question_keyboard(
+        self, peer_id: int, header: str, question_text: str, options: List[dict]
     ):
-        """Отправить сообщение с клавиатурой (кнопки-действия)."""
-        logger.info(f"[/models debug] send_keyboard called for peer_id={peer_id}, buttons={len(buttons)}")
+        """Отправка inline-клавиатуры для вопросов (каждая опция – кнопка с текстом)."""
+        buttons = []
+        for opt in options:
+            buttons.append(
+                [
+                    {
+                        "action": {
+                            "type": "text",
+                            "label": opt["label"],
+                        },
+                        "color": "primary",
+                    }
+                ]
+            )
+        keyboard = {"inline": False, "buttons": buttons}
+        text = f"🔧 {header}\n\n{question_text}"
+        await self.send_message(peer_id, text, keyboard=keyboard)
+
+    async def send_keyboard(self, peer_id: int, text: str, buttons: list):
+        """Отправить произвольную клавиатуру."""
         keyboard = {"inline": False, "buttons": buttons}
         await self.send_message(peer_id, text, keyboard=keyboard)
-        logger.info(f"[/models debug] send_keyboard completed for peer_id={peer_id}")
 
     async def send_file(
         self, peer_id: int, file_path: str, filename: str, caption: str = ""
     ) -> int:
+        """Загрузить и отправить файл (документ)."""
         logger.info(f"send_file: file={file_path}, peer_id={peer_id}")
+
+        # 1. Получить URL для загрузки
         params = {
             "access_token": self.token,
             "v": self.api_version,
@@ -120,33 +144,33 @@ class VKClient:
             "peer_id": peer_id,
         }
         url = f"{self.BASE_URL}docs.getMessagesUploadServer?{urlencode(params)}"
-        logger.info(f"send_file: getting upload url: {url}")
         async with self.session.get(url) as resp:
             data = await resp.json()
-            logger.info(f"send_file: upload response: {data}")
             if "error" in data:
                 raise Exception(f"VK API error getting upload url: {data['error']}")
             upload_url = data["response"]["upload_url"]
-            logger.info(f"send_file: upload_url={upload_url}")
 
+        # 2. Загрузить файл
         with open(file_path, "rb") as f:
             content = f.read()
-        form_data = aiohttp.FormData()
-        form_data.add_field("file", content, filename=filename, content_type="application/json")
+        form_data = FormData()
+        form_data.add_field(
+            "file", content, filename=filename, content_type="application/json"
+        )
         async with self.session.post(upload_url, data=form_data) as resp:
             upload_data = await resp.json()
-            logger.info(f"send_file: upload_data={upload_data}")
 
+        # 3. Сохранить документ в VK
         params = {"access_token": self.token, "v": self.api_version}
         params.update(upload_data)
         url = f"{self.BASE_URL}docs.save?{urlencode(params)}"
         async with self.session.post(url) as resp:
             save_data = await resp.json()
-            logger.info(f"send_file: save_data={save_data}")
         doc = save_data["response"]["doc"]
         doc_id = doc["id"]
         doc_owner_id = doc["owner_id"]
 
+        # 4. Отправить документ
         attachment = f"doc{doc_owner_id}_{doc_id}"
         params = {
             "access_token": self.token,
@@ -161,3 +185,25 @@ class VKClient:
         async with self.session.get(url) as resp:
             result = await resp.json()
         return result[0]["message_id"] if isinstance(result, list) else result
+
+    async def edit_message(
+        self, peer_id: int, message_id: int, text: str, keyboard: Optional[dict] = None
+    ) -> bool:
+        """Редактирует существующее сообщение (бот должен быть автором)."""
+        params = {
+            "peer_id": peer_id,
+            "message_id": message_id,
+            "message": text,
+            "access_token": self.token,
+            "v": self.api_version,
+        }
+        if keyboard is not None:
+            params["keyboard"] = json.dumps(keyboard)
+        url = f"{self.BASE_URL}messages.edit"
+        async with self.session.post(url, data=params) as resp:
+            data = await resp.json()
+            if "error" in data:
+                logger.error(f"Failed to edit message {message_id}: {data['error']}")
+                return False
+            logger.info(f"Edited message {message_id} successfully")
+            return True

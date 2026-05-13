@@ -1,10 +1,7 @@
 """Парсер сообщений OpenCode."""
 
-import logging
 from dataclasses import dataclass
 from typing import List, Optional
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -110,7 +107,7 @@ def get_new_parts(messages: List[dict], seen_part_ids: set) -> List[Part]:
                 )
             else:
                 # Неизвестный тип — пропускаем
-                logger.warning("Unknown type: %s", part_type)
+                # print("Unknown type : ", part_type)
                 continue
 
             new_parts.append(Part(id=part_id, type=part_type, text=text))

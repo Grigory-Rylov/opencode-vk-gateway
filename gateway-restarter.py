@@ -21,7 +21,7 @@ from aiohttp import ClientSession, ClientTimeout
 
 # Парсинг аргументов
 parser = argparse.ArgumentParser(description="VK Gateway Reloader")
-parser.add_argument("--autostart", action="store_true", help="Auto-start opencode-vk-gateway.py on launch")
+parser.add_argument("--autostart", action="store_true", help="Auto-start opencode-vk-gateway on launch")
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -38,7 +38,7 @@ logger = logging.getLogger("vk-reloader")
 
 # Путь к основному скрипту
 SCRIPT_DIR = Path(__file__).parent.resolve()
-MAIN_SCRIPT = SCRIPT_DIR / "opencode-vk-gateway.py"
+MAIN_SCRIPT = SCRIPT_DIR / "main.py"
 PID_FILE = SCRIPT_DIR / ".gateway.pid"
 
 LLAMA_SERVER_PORT = 8081
@@ -59,7 +59,7 @@ def load_config() -> tuple[str, int]:
         token = config.get("vk_token", "")
         if not token:
             raise ValueError("vk_token is empty in config.json")
-        notify_peer_id = config.get("thinking_peer_id", 2000000000)
+        notify_peer_id = config.get("peer_id", 2000000000)
         return token, notify_peer_id
     except FileNotFoundError:
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -200,7 +200,7 @@ class LlamaServerMonitor:
 
 
 def restart_gateway(version: str = None):
-    """Перезапускает основной скрипт opencode-vk-gateway.py.
+    """Перезапускает основной скрипт opencode-vk-gateway.
     
     Args:
         version: Версия для запуска - "default", "v0", "v1". Если None - автовыбор по приоритету.
@@ -274,7 +274,7 @@ def restart_gateway(version: str = None):
             )
             save_gateway_pid(proc.pid)
             started_from = str(script_path.relative_to(SCRIPT_DIR))
-            logger.info(f"Successfully started opencode-vk-gateway.py from {started_from} (PID: {proc.pid})")
+            logger.info(f"Successfully started main.py from {started_from} (PID: {proc.pid})")
 
             time.sleep(3)
 
@@ -347,13 +347,13 @@ class VKLongPollReloader:
             logger.info(f"Received {command} command, version={version}")
             try:
                 version_text = f" (версия: {version})" if version else " (автовыбор)"
-                await self.vk.send_message(peer_id, f"🔄 Перезагрузка opencode-vk-gateway.py{version_text}...")
+                await self.vk.send_message(peer_id, f"🔄 Перезагрузка opencode-vk-gateway {version_text}...")
                 success, started_from = restart_gateway(version)
                 if success:
                     from_text = f"\n📁 Запущен из: `{started_from}`"
-                    await self.vk.send_message(peer_id, f"✅ opencode-vk-gateway.py перезапущен{version_text}{from_text}")
+                    await self.vk.send_message(peer_id, f"✅ opencode-vk-gateway перезапущен{version_text}{from_text}")
                 else:
-                    await self.vk.send_message(peer_id, f"❌ Не удалось перезапустить opencode-vk-gateway.py{version_text}")
+                    await self.vk.send_message(peer_id, f"❌ Не удалось перезапустить opencode-vk-gateway {version_text}")
             except Exception as e:
                 logger.error(f"Error handling {command}: {e}")
                 try:
@@ -364,10 +364,10 @@ class VKLongPollReloader:
             help_text = """
 🔄 Команды перезапуска:
 
-/start - Автовыбор (v1.py → v0.py → opencode-vk-gateway.py)
+/start - Автовыбор (v1.py → v0.py → opencode-vk-gateway)
 /start default - Запуск opencode-vk-gateway.py
 /start v0 - Запуск v0.py из текущего каталога
-/start v1 - Запуск v1.py (если нет → v0.py → opencode-vk-gateway.py)
+/start v1 - Запуск v1.py (если нет → v0.py → opencode-vk-gateway)
 
 /update - То же что /start
 /update default|v0|v1 - Запуск конкретной версии
@@ -525,15 +525,15 @@ async def main():
 
     # Автозапуск основного скрипта при старте (если передан флаг --autostart)
     if args.autostart:
-        logger.info("Starting opencode-vk-gateway.py on reloader startup (--autostart)...")
+        logger.info("Starting opencode-vk-gateway on reloader startup (--autostart)...")
         try:
             success = restart_gateway()
             if success:
-                logger.info("opencode-vk-gateway.py started successfully")
+                logger.info("main.py started successfully")
             else:
-                logger.warning("Failed to start opencode-vk-gateway.py on startup")
+                logger.warning("Failed to start main.py on startup")
         except Exception as e:
-            logger.error(f"Error starting opencode-vk-gateway.py: {e}")
+            logger.error(f"Error starting main.py: {e}")
     else:
         logger.info("VK Reloader started. Use /update command to start gateway.")
 
