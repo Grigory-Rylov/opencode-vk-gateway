@@ -42,11 +42,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_SCRIPT = SCRIPT_DIR / "main.py"
 PID_FILE = SCRIPT_DIR / ".gateway.pid"
 
-LLAMA_SERVER_PORT = 8081
-
-
-def load_config() -> Tuple[str, int]:
-    """Загружает токен и peer_id из config.json."""
+def load_config() -> Tuple[str, int, Optional[str]]:
+    """Загружает токен, peer_id и llama_server_host из config.json."""
     config_path = SCRIPT_DIR / "config.json"
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -55,7 +52,8 @@ def load_config() -> Tuple[str, int]:
         if not token:
             raise ValueError("vk_token is empty in config.json")
         notify_peer_id = config.get("peer_id", 2000000000)
-        return token, notify_peer_id
+        llama_server_host = config.get("llama_server_host", "")
+        return token, notify_peer_id, llama_server_host
     except FileNotFoundError:
         raise FileNotFoundError(f"Config file not found: {config_path}")
     except json.JSONDecodeError as e:
@@ -134,14 +132,16 @@ def is_process_running(pid: int) -> bool:
         return False
 
 
-def is_llama_server_running() -> bool:
-    """Проверяет, запущен ли llama-server на порту LLAMA_SERVER_PORT."""
+async def is_llama_server_running(llama_server_host: Optional[str]) -> bool:
+    """Проверяет, запущен ли llama-server на удалённом хосте."""
+    if not llama_server_host:
+        return True
+
     try:
-        result = subprocess.run(
-            ["lsof", "-i", f":{LLAMA_SERVER_PORT}"],
-            capture_output=True
-        )
-        return result.returncode == 0
+        timeout = ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(llama_server_host) as resp:
+                return resp.status == 200
     except Exception as e:
         logger.warning(f"Failed to check llama-server status: {e}")
         return False
@@ -150,8 +150,9 @@ def is_llama_server_running() -> bool:
 class LlamaServerMonitor:
     """Мониторит состояние llama-server и уведомляет при падении."""
 
-    def __init__(self, vk: 'VKClient', check_interval: int = 30):
+    def __init__(self, vk: 'VKClient', llama_server_host: Optional[str], check_interval: int = 30):
         self.vk = vk
+        self.llama_server_host = llama_server_host
         self.check_interval = check_interval
         self._was_running = False
         self._running = False
@@ -174,7 +175,7 @@ class LlamaServerMonitor:
             if not self._running:
                 break
 
-            is_running = is_llama_server_running()
+            is_running = await is_llama_server_running(self.llama_server_host)
 
             if self._was_running and not is_running:
                 logger.warning("Llama-server is down!")
@@ -493,9 +494,10 @@ async def main():
         return
 
     try:
-        token, notify_peer_id = load_config()
+        token, notify_peer_id, llama_server_host = load_config()
         logger.info(f"VK token loaded (len={len(token)})")
         logger.info(f"Notify peer_id: {notify_peer_id}")
+        logger.info(f"Llama server host: {llama_server_host or '(not configured)'}")
     except Exception as e:
         logger.error(f"Failed to load config: {e}")
         return
@@ -515,7 +517,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Failed to send startup notification: {e}")
 
-        monitor = LlamaServerMonitor(vk, check_interval=30)
+        monitor = LlamaServerMonitor(vk, llama_server_host, check_interval=30)
         monitor_task = asyncio.create_task(monitor.check_loop(notify_peer_id))
 
         poller = VKLongPollReloader(vk)
