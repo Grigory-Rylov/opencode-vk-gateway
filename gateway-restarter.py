@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 VK Gateway Reloader
-Слушает команду /update и перезапускает opencode-vk-gateway.py
+Слушает команды /update, /b и управляет перезапуском main.py
 """
 
 import argparse
@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 from urllib.parse import urlencode
 
 import aiohttp
@@ -21,7 +22,7 @@ from aiohttp import ClientSession, ClientTimeout
 
 # Парсинг аргументов
 parser = argparse.ArgumentParser(description="VK Gateway Reloader")
-parser.add_argument("--autostart", action="store_true", help="Auto-start opencode-vk-gateway on launch")
+parser.add_argument("--autostart", action="store_true", help="Auto-start main.py on launch")
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -36,22 +37,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vk-reloader")
 
-# Путь к основному скрипту
+# Пути
 SCRIPT_DIR = Path(__file__).parent.resolve()
 MAIN_SCRIPT = SCRIPT_DIR / "main.py"
 PID_FILE = SCRIPT_DIR / ".gateway.pid"
 
 LLAMA_SERVER_PORT = 8081
 
-# Пути к версиям скрипта для запуска (приоритет: v1 -> v0 -> корень)
-SCRIPT_VERSIONS = [
-    SCRIPT_DIR / "v1.py",
-    SCRIPT_DIR / "v0.py",
-    MAIN_SCRIPT,
-]
 
-# Загрузка токена из config.json
-def load_config() -> tuple[str, int]:
+def load_config() -> Tuple[str, int]:
+    """Загружает токен и peer_id из config.json."""
     config_path = SCRIPT_DIR / "config.json"
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -93,7 +88,7 @@ class VKClient:
                 raise Exception(f"VK API error: {data['error']}")
             return data["response"]
 
-    async def get_long_poll_server(self) -> tuple[str, str, int]:
+    async def get_long_poll_server(self) -> Tuple[str, str, int]:
         resp = await self._api_request("messages.getLongPollServer", {})
         return resp["server"], resp["key"], int(resp["ts"])
 
@@ -107,7 +102,7 @@ class VKClient:
         return resp[0]["message_id"] if isinstance(resp, list) else resp
 
 
-def get_gateway_pid() -> int | None:
+def get_gateway_pid() -> Optional[int]:
     """Читает PID основного процесса из файла."""
     if PID_FILE.exists():
         try:
@@ -199,19 +194,21 @@ class LlamaServerMonitor:
         logger.info("LlamaServerMonitor stopped")
 
 
-def restart_gateway(version: str = None):
-    """Перезапускает основной скрипт opencode-vk-gateway.
-    
-    Args:
-        version: Версия для запуска - "default", "v0", "v1". Если None - автовыбор по приоритету.
-    
-    Returns:
-        tuple: (success: bool, started_from: str | None)
+def restart_gateway() -> Tuple[bool, Optional[str]]:
     """
-    logger.info("=== Restarting opencode-vk-gateway.py ===")
-    logger.info(f"restart_gateway: SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}, version={version}")
+    Перезапускает main.py.
 
-    # Проверяем PID файл
+    Returns:
+        tuple: (success: bool, error_message: str | None)
+    """
+    logger.info("=== Restarting main.py ===")
+    logger.info(f"SCRIPT_DIR={SCRIPT_DIR}, cwd={Path.cwd()}")
+
+    # Проверяем что main.py существует
+    if not MAIN_SCRIPT.exists():
+        return False, f"main.py не найден: {MAIN_SCRIPT}"
+
+    # Останавливаем старый процесс
     old_pid = get_gateway_pid()
     if old_pid and is_process_running(old_pid):
         logger.info(f"Stopping existing process (PID: {old_pid})")
@@ -234,62 +231,32 @@ def restart_gateway(version: str = None):
         except Exception as e:
             logger.warning(f"Failed to remove debug.log: {e}")
 
-    # Определяем какие версии пробовать
-    if version:
-        version = version.lower()
-        if version == "default":
-            scripts_to_try = [MAIN_SCRIPT]
-        elif version == "v0":
-            # Для /update v0 запускаем v0.py из текущего каталога
-            scripts_to_try = [SCRIPT_DIR / "v0.py"]
-        elif version == "v1":
-            # Для /update v1 или /start v1: v1.py -> v0.py -> opencode-vk-gateway.py
-            scripts_to_try = [SCRIPT_DIR / "v1.py", SCRIPT_DIR / "v0.py", MAIN_SCRIPT]
-        else:
-            logger.warning(f"Unknown version '{version}', using auto-select")
-            scripts_to_try = SCRIPT_VERSIONS
-    else:
-        # Автовыбор: v1.py -> v0.py -> opencode-vk-gateway.py
-        scripts_to_try = SCRIPT_VERSIONS
-    
-    logger.info(f"Scripts to try: {[str(p.relative_to(SCRIPT_DIR)) for p in scripts_to_try]}")
-
     # Запускаем новый процесс
     venv_python = SCRIPT_DIR / "venv/bin/python"
     log_file = SCRIPT_DIR / "debug.log"
-    stdout_file = open(log_file, "w")
-    
-    for script_path in scripts_to_try:
-        logger.info(f"Trying to start from: {script_path}")
-        if not script_path.exists():
-            logger.info(f"Script not found: {script_path}, skipping")
-            continue
-        
-        try:
-            proc = subprocess.Popen(
-                [str(venv_python), str(script_path), "-d"],
-                stdout=stdout_file,
-                stderr=subprocess.STDOUT,
-                cwd=str(SCRIPT_DIR),
-            )
-            save_gateway_pid(proc.pid)
-            started_from = str(script_path.relative_to(SCRIPT_DIR))
-            logger.info(f"Successfully started main.py from {started_from} (PID: {proc.pid})")
 
-            time.sleep(3)
+    try:
+        stdout_file = open(log_file, "w")
+        proc = subprocess.Popen(
+            [str(venv_python), str(MAIN_SCRIPT), "-d"],
+            stdout=stdout_file,
+            stderr=subprocess.STDOUT,
+            cwd=str(SCRIPT_DIR),
+        )
+        save_gateway_pid(proc.pid)
+        logger.info(f"Started main.py (PID: {proc.pid})")
 
-            if not is_process_running(proc.pid):
-                logger.error(f"Process from {script_path} exited immediately!")
-                continue
-            
+        time.sleep(3)
+
+        if not is_process_running(proc.pid):
             stdout_file.close()
-            return True, started_from
-        except Exception as e:
-            logger.error(f"Failed to start from {script_path}: {e}")
-    
-    stdout_file.close()
-    logger.error("All script versions failed to start!")
-    return False, None
+            return False, "Процесс main.py упал сразу после запуска"
+
+        stdout_file.close()
+        return True, None
+    except Exception as e:
+        logger.error(f"Failed to start main.py: {e}")
+        return False, str(e)
 
 
 class VKLongPollReloader:
@@ -304,7 +271,7 @@ class VKLongPollReloader:
         self.server, self.key, self.ts = await self.vk.get_long_poll_server()
         logger.info(f"Long Poll server refreshed: {self.server}")
 
-    async def _get_long_poll_events(self) -> tuple[list, int]:
+    async def _get_long_poll_events(self) -> Tuple[list, int]:
         params = {
             "act": "a_check",
             "key": self.key,
@@ -336,74 +303,67 @@ class VKLongPollReloader:
         if not text.strip():
             return
 
-        logger.info(f"New message from {peer_id}: '{text}'")
+        logger.info(f"New message from {peer_id}: '{text[:50]}...'")
 
-        # Проверяем команду /update /start
         parts = text.strip().split()
         command = parts[0].lower() if parts else ""
-        
+
         if command in ("/update", "/start"):
-            version = parts[1] if len(parts) > 1 else None
-            logger.info(f"Received {command} command, version={version}")
-            try:
-                version_text = f" (версия: {version})" if version else " (автовыбор)"
-                await self.vk.send_message(peer_id, f"🔄 Перезагрузка opencode-vk-gateway {version_text}...")
-                success, started_from = restart_gateway(version)
-                if success:
-                    from_text = f"\n📁 Запущен из: `{started_from}`"
-                    await self.vk.send_message(peer_id, f"✅ opencode-vk-gateway перезапущен{version_text}{from_text}")
-                else:
-                    await self.vk.send_message(peer_id, f"❌ Не удалось перезапустить opencode-vk-gateway {version_text}")
-            except Exception as e:
-                logger.error(f"Error handling {command}: {e}")
-                try:
-                    await self.vk.send_message(peer_id, f"❌ Ошибка: {e}")
-                except:
-                    pass
+            await self._handle_update_command(peer_id)
         elif command == "/restart-help":
-            help_text = """
-🔄 Команды перезапуска:
-
-/start - Автовыбор (v1.py → v0.py → opencode-vk-gateway)
-/start default - Запуск opencode-vk-gateway.py
-/start v0 - Запуск v0.py из текущего каталога
-/start v1 - Запуск v1.py (если нет → v0.py → opencode-vk-gateway)
-
-/update - То же что /start
-/update default|v0|v1 - Запуск конкретной версии
-"""
-            try:
-                await self.vk.send_message(peer_id, help_text)
-            except:
-                pass
+            await self._send_help(peer_id)
         elif command in ("/b", "/branch"):
             await self._handle_branch_command(peer_id, parts)
         else:
-            logger.debug(f"Ignoring message (not /update): '{text}'")
+            logger.debug(f"Ignoring message (not a command): '{command}'")
+
+    async def _handle_update_command(self, peer_id: int):
+        """Обрабатывает команду /update или /start."""
+        logger.info("Received /update command")
+        try:
+            await self.vk.send_message(peer_id, "🔄 Перезагрузка main.py...")
+            success, error = restart_gateway()
+            if success:
+                await self.vk.send_message(peer_id, "✅ main.py перезапущен")
+            else:
+                await self.vk.send_message(peer_id, f"❌ Не удалось перезапустить: {error}")
+        except Exception as e:
+            logger.error(f"Error handling /update: {e}")
+            try:
+                await self.vk.send_message(peer_id, f"❌ Ошибка: {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+
+    async def _send_help(self, peer_id: int):
+        """Отправляет справку."""
+        help_text = """
+🔄 Команды Gateway Restarter:
+
+/update - Перезапустить main.py
+/start - То же что /update
+
+/b <branch> - Переключиться на ветку
+/b <branch> -f - Форсированный чекаут (сбросить изменения и подтянуть с сервера)
+
+/restart-help - Показать эту справку
+"""
+        try:
+            await self.vk.send_message(peer_id, help_text)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
 
     async def _handle_branch_command(self, peer_id: int, parts: list):
         """Handle /b or /branch command to checkout a git branch."""
         if len(parts) < 2:
-            help_text = """
-🔀 Команды переключения веток:
-
-/b <branch> - Переключиться на ветку
-/b <branch> -f - Форсированный чекаут (сбросить изменения)
-
-Если ветка не найдена локально, будет попытка создать из remote.
-"""
-            try:
-                await self.vk.send_message(peer_id, help_text)
-            except:
-                pass
+            await self._send_help(peer_id)
             return
 
         branch_name = parts[1]
         force = len(parts) > 2 and parts[2].lower() == "-f"
-        
+
         logger.info(f"Received /branch command: branch={branch_name}, force={force}")
-        
-        def _run_git_command(*args, check=False) -> tuple:
+
+        def _run_git_command(*args, timeout: int = 30) -> Tuple[bool, str]:
             """Run a git command and return (success, output)."""
             try:
                 result = subprocess.run(
@@ -411,67 +371,89 @@ class VKLongPollReloader:
                     cwd=str(SCRIPT_DIR),
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=timeout,
                 )
-                return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
+                output = result.stdout.strip() or result.stderr.strip()
+                return result.returncode == 0, output
             except subprocess.TimeoutExpired:
                 return False, "Git command timed out"
             except Exception as e:
                 return False, str(e)
 
-        # Если форс - сбросить все изменения
+        # Сначала обновляем информацию о remote
+        await self.vk.send_message(peer_id, f"🔄 Обновляю информацию о ветках...")
+        success, output = _run_git_command("fetch", "--all", timeout=60)
+        if not success:
+            logger.warning(f"fetch failed: {output}")
+            # Не прерываем, продолжаем
+
+        # Если форс - сбросить все локальные изменения
         if force:
-            await self.vk.send_message(peer_id, f"🔄 Сброс изменений и форс-чекаут на `{branch_name}`...")
+            await self.vk.send_message(peer_id, f"🔄 Форсированный чекаут на `{branch_name}` (сброс изменений)...")
+
+            # Сбрасываем все локальные изменения
             success, output = _run_git_command("reset", "--hard", "HEAD")
             if not success:
-                await self.vk.send_message(peer_id, f"❌ Не удалось сбросить изменения: {output}")
+                await self.vk.send_message(peer_id, f"❌ Не удалось сбросить изменения: `{output}`")
                 return
+
+            # Удаляем untracked файлы
             success, output = _run_git_command("clean", "-fd")
             if not success:
                 logger.warning(f"clean -fd failed (non-critical): {output}")
-        
-        # Сначала попробуем локальный чекаут
+        else:
+            await self.vk.send_message(peer_id, f"🔄 Переключение на ветку `{branch_name}`...")
+
+        # Пробуем чекаут локальной ветки
         success, output = _run_git_command("checkout", branch_name)
-        if success:
-            await self.vk.send_message(peer_id, f"✅ Переключено на ветку `{branch_name}`")
-            return
-        
-        # Если ветка не найдена локально - попробуем создать из remote
-        logger.info(f"Branch {branch_name} not found locally, checking remote...")
-        
-        # Сначала обновим remote
-        success, output = _run_git_command("fetch", "--all")
         if not success:
-            logger.warning(f"fetch failed: {output}")
-        
-        # Попробуем создать ветку из remote
-        success, output = _run_git_command("checkout", "-b", branch_name, f"origin/{branch_name}")
-        if success:
-            await self.vk.send_message(peer_id, f"✅ Создана новая ветка `{branch_name}` из remote")
+            # Ветка не найдена локально - пробуем создать из remote
+            logger.info(f"Branch {branch_name} not found locally, trying remote...")
+            success, output = _run_git_command("checkout", "-b", branch_name, f"origin/{branch_name}")
+            if not success:
+                # Пробуем создать пустую локальную ветку
+                success, output = _run_git_command("checkout", "-b", branch_name)
+                if not success:
+                    await self.vk.send_message(
+                        peer_id,
+                        f"❌ Не удалось переключиться на ветку `{branch_name}`\n`{output}`"
+                    )
+                    return
+                await self.vk.send_message(
+                    peer_id,
+                    f"✅ Создана новая локальная ветка `{branch_name}` (remote не найден)"
+                )
+                return
+            await self.vk.send_message(
+                peer_id,
+                f"✅ Создана ветка `{branch_name}` из origin"
+            )
+            # После создания из origin - подтягиваем свежак
+            success, output = _run_git_command("pull", "origin", branch_name)
+            if success:
+                await self.vk.send_message(peer_id, f"📥 Подтянуты изменения с сервера")
             return
-        
-        # Если remote тоже нет - попробуем создать пустую
-        logger.info(f"Remote branch {branch_name} not found either")
-        success, output = _run_git_command("checkout", "-b", branch_name)
+
+        # Если были на локальной ветке - подтягиваем свежак
+        await self.vk.send_message(peer_id, f"✅ Переключено на ветку `{branch_name}`")
+
+        # Подтягиваем изменения с сервера
+        success, output = _run_git_command("pull", "origin", branch_name, timeout=60)
         if success:
-            await self.vk.send_message(peer_id, f"✅ Создана новая локальная ветка `{branch_name}` (remote не найден)")
-            return
-        
-        # Все попытки исчерпаны
-        error_msg = f"❌ Не удалось переключиться на ветку `{branch_name}`\n"
-        if force:
-            error_msg += "Была попытка сбросить изменения.\n"
-        error_msg += f"Ошибки:\n"
-        error_msg += f"  - checkout: {output}\n"
-        error_msg += "Возможно, ветка не существует ни локально, ни на remote."
-        
-        await self.vk.send_message(peer_id, error_msg)
+            # Проверяем были ли изменения
+            if "Already up to date" in output or "Уже обновлено" in output:
+                await self.vk.send_message(peer_id, f"📥 Ветка уже актуальна")
+            else:
+                await self.vk.send_message(peer_id, f"📥 Подтянуты изменения с сервера")
+        else:
+            logger.warning(f"pull failed: {output}")
+            # Не критично если pull не удался
 
     async def run(self):
         self.running = True
         await self._refresh_long_poll_server()
 
-        logger.info("VK Reloader started. Waiting for /update command...")
+        logger.info("VK Reloader started. Waiting for commands...")
 
         while self.running:
             try:
@@ -488,7 +470,7 @@ class VKLongPollReloader:
             except asyncio.CancelledError:
                 break
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                logger.warning(f"Long poll timeout or client error: {e}. Reconnecting...")
+                logger.warning(f"Long poll error: {e}. Reconnecting...")
                 await asyncio.sleep(3)
                 await self._refresh_long_poll_server()
             except Exception as e:
@@ -505,15 +487,10 @@ async def main():
     logger.info("=== VK Gateway Reloader ===")
     logger.info(f"Script directory: {SCRIPT_DIR}")
     logger.info(f"Main script: {MAIN_SCRIPT}")
-    logger.info(f"Current working directory: {Path.cwd()}")
-    logger.info(f"Script versions to try: {[str(p.relative_to(SCRIPT_DIR)) for p in SCRIPT_VERSIONS]}")
 
-    # Проверяем что хотя бы одна версия скрипта существует
-    available = [p for p in SCRIPT_VERSIONS if p.exists()]
-    if not available:
-        logger.error("No opencode_vk_gateway.py found in any version directory!")
+    if not MAIN_SCRIPT.exists():
+        logger.error(f"main.py not found: {MAIN_SCRIPT}")
         return
-    logger.info(f"Available scripts: {[str(p.relative_to(SCRIPT_DIR)) for p in available]}")
 
     try:
         token, notify_peer_id = load_config()
@@ -523,24 +500,18 @@ async def main():
         logger.error(f"Failed to load config: {e}")
         return
 
-    # Автозапуск основного скрипта при старте (если передан флаг --autostart)
+    # Автозапуск при старте
     if args.autostart:
-        logger.info("Starting opencode-vk-gateway on reloader startup (--autostart)...")
-        try:
-            success = restart_gateway()
-            if success:
-                logger.info("main.py started successfully")
-            else:
-                logger.warning("Failed to start main.py on startup")
-        except Exception as e:
-            logger.error(f"Error starting main.py: {e}")
-    else:
-        logger.info("VK Reloader started. Use /update command to start gateway.")
+        logger.info("Starting main.py on reloader startup (--autostart)...")
+        success, error = restart_gateway()
+        if success:
+            logger.info("main.py started successfully")
+        else:
+            logger.warning(f"Failed to start main.py: {error}")
 
     async with VKClient(token) as vk:
         try:
             await vk.send_message(notify_peer_id, "✅ Gateway Restarter запущен")
-            logger.info(f"Sent startup notification to peer_id: {notify_peer_id}")
         except Exception as e:
             logger.warning(f"Failed to send startup notification: {e}")
 

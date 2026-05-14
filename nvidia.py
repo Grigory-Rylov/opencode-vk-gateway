@@ -44,14 +44,14 @@ class NvidiaInfo:
 async def run_nvidia_smi(timeout: int = 30, path: str = "nvidia-smi") -> bytes:
     """
     Execute nvidia-smi command and return raw output.
-    
+
     Args:
         timeout: Timeout in seconds
         path: Path to nvidia-smi executable
-    
+
     Returns:
         Raw bytes output from nvidia-smi
-    
+
     Raises:
         FileNotFoundError: If nvidia-smi not found
         asyncio.TimeoutError: If command times out
@@ -67,12 +67,12 @@ async def run_nvidia_smi(timeout: int = 30, path: str = "nvidia-smi") -> bytes:
             process.communicate(),
             timeout=timeout,
         )
-        
+
         if process.returncode != 0:
             raise subprocess.SubprocessError(
                 f"nvidia-smi returned non-zero exit code: {process.returncode}",
             )
-        
+
         return stdout
     except FileNotFoundError:
         raise FileNotFoundError(
@@ -98,29 +98,29 @@ _STATS_LINE_RE = re.compile(
 def parse_nvidia_smi(raw_output: bytes) -> NvidiaInfo:
     """
     Parse nvidia-smi output into NvidiaInfo structure.
-    
+
     Args:
         raw_output: Raw bytes output from nvidia-smi
-    
+
     Returns:
         Parsed NvidiaInfo structure
-    
+
     Raises:
         ValueError: If output cannot be parsed
     """
     text = raw_output.decode("utf-8", errors="replace")
     lines = text.strip().split("\n")
-    
+
     smi_version = "unknown"
     driver_version = "unknown"
     cuda_version = "unknown"
     gpus = []
-    
+
     current_gpu = None
-    
+
     for line in lines:
         line = line.strip()
-        
+
         # Parse version line: "NVIDIA-SMI 595.58.03  Driver Version: 595.58.03  CUDA Version: 13.2"
         version_match = _VERSION_LINE_RE.search(line)
         if version_match:
@@ -128,7 +128,7 @@ def parse_nvidia_smi(raw_output: bytes) -> NvidiaInfo:
             driver_version = version_match.group(2)
             cuda_version = version_match.group(3)
             continue
-        
+
         # Parse GPU header line: "|   0  NVIDIA GeForce RTX 3090        Off |"
         gpu_header_match = _GPU_HEADER_RE.search(line)
         if gpu_header_match:
@@ -147,7 +147,7 @@ def parse_nvidia_smi(raw_output: bytes) -> NvidiaInfo:
             )
             gpus.append(current_gpu)
             continue
-        
+
         # Parse stats line: "50%   56C    P2            111W /  300W |   11248MiB /  24576MiB |      0%      Default"
         # Groups: (1)util%, (2)tempC, (3)perf, (4)powerW, (5)capW, (6)memUsed, (7)memTotal, (8)utilAfterPipe, (9)mode
         if current_gpu and _STATS_LINE_RE.search(line):
@@ -161,7 +161,7 @@ def parse_nvidia_smi(raw_output: bytes) -> NvidiaInfo:
                 current_gpu.memory_used = int(match.group(6))
                 current_gpu.memory_total = int(match.group(7))
                 current_gpu = None
-    
+
     return NvidiaInfo(
         smi_version=smi_version,
         driver_version=driver_version,
@@ -174,10 +174,10 @@ def format_for_vk(info: NvidiaInfo) -> str:
     """
     Format NvidiaInfo as concise text suitable for VK message.
     Only includes essential information.
-    
+
     Args:
         info: Parsed NvidiaInfo structure
-    
+
     Returns:
         Formatted text string
     """
@@ -186,7 +186,7 @@ def format_for_vk(info: NvidiaInfo) -> str:
         f"Driver: {info.driver_version} | CUDA: {info.cuda_version}",
         "─" * 40,
     ]
-    
+
     for gpu in info.gpus:
         lines.append(
             f"GPU {gpu.id}: {gpu.name}"
@@ -196,17 +196,17 @@ def format_for_vk(info: NvidiaInfo) -> str:
             f"{gpu.power_usage}W/{gpu.power_cap}W  "
             f"{gpu.memory_used}/{gpu.memory_total}MiB ({gpu.memory_percent}%)"
         )
-    
+
     return "\n".join(lines)
 
 
 def format_gpu_simple(info: NvidiaInfo) -> str:
     """
     Format GPU info as simple one-line per GPU (nvidia-smi style).
-    
+
     Args:
         info: Parsed NvidiaInfo structure
-    
+
     Returns:
         Formatted text string with one line per GPU
     """
@@ -223,10 +223,10 @@ def format_gpu_simple(info: NvidiaInfo) -> str:
 async def get_gpu_simple_message(timeout: int = 30) -> tuple[Optional[str], Optional[str]]:
     """
     Get GPU information in simple format for VK message.
-    
+
     Args:
         timeout: Timeout in seconds
-    
+
     Returns:
         Tuple of (message_text, error_text) - one will be None
     """
@@ -246,12 +246,12 @@ async def get_gpu_simple_message(timeout: int = 30) -> tuple[Optional[str], Opti
 async def get_gpu_info_vk_message(timeout: int = 30) -> tuple[Optional[str], Optional[str]]:
     """
     Get GPU information and format as VK message.
-    
+
     Convenience function that runs nvidia-smi, parses, and formats output.
-    
+
     Args:
         timeout: Timeout in seconds
-    
+
     Returns:
         Tuple of (message_text, error_text) - one will be None
     """
