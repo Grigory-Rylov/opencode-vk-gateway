@@ -8,6 +8,7 @@
   "thinking_peer_id": 2000000003,
   "model": "llama.cpp/qwen3.6-claude",
   "opencode_bin_path": "/path/to/opencode/bin/opencode",
+  "opencode_config_path": "~/.config/opencode/opencode.json",
   "llama_server_path": "/path/to/llama-server",
   "llama_server_host": "http://localhost:8081",
   "models": {

@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "thinking_peer_id": 2000000506,
     "model": "llama.cpp/qwen3.5-122b",
     "llama_server_path": "llama-server",
+    "opencode_config_path": "~/.config/opencode/opencode.json",
     "models": [],
     "default_model": "qwen3.5-122b",
 }
@@ -69,3 +70,4 @@ if not VK_TOKEN:
 SCRIPT_DIR = Path(__file__).parent.resolve()
 OPENCODE_BIN = Path(CONFIG["opencode_bin_path"])
 ATTACHES_DIR = SCRIPT_DIR / "attaches"
+OPENCODE_CONFIG_PATH = Path(CONFIG.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()

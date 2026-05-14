@@ -12,11 +12,10 @@ from typing import Optional, Tuple
 import aiohttp
 
 from config import (
-    LLAMA_SERVER_PATH,
-    MCP_SERVERS,
-    SESSION_FILE,
     SCRIPT_DIR,
-    OPENCODE_URL,
+    MCP_SERVERS,
+    OPENCODE_CONFIG_PATH,
+    load_config,
 )
 from logging_config import logger
 from models import get_model_by_alias, get_current_model
@@ -103,7 +102,7 @@ async def wait_for_llama_server(
 def update_opencode_config(model: dict, alias: str) -> bool:
     """Обновляет конфиг OpenCode с провайдером и MCP."""
     try:
-        opencode_config_path = Path.home() / ".config/opencode/opencode.json"
+        opencode_config_path = OPENCODE_CONFIG_PATH
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model.get("model", ""),
