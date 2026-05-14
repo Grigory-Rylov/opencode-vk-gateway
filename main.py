@@ -1106,7 +1106,7 @@ class VKLongPoll:
                 ],
             }
 
-            msg_id = await self.vk.send_message_post(user_id, msg, keyboard=keyboard)
+            msg_id = await self.vk.send_message(user_id, msg, keyboard=keyboard)
             self.pending_permissions[perm_id] = (session_id, user_id, msg_id)
             logger.info(f"Sent permission request {perm_id} to user {user_id}")
 

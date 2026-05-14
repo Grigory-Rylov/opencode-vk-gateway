@@ -1,7 +1,7 @@
 """
 VK Client - обёртка для VK API
-Поддерживает как GET, так и POST методы для отправки сообщений,
-а также клавиатуры, файлы и вопросные клавиатуры.
+Использует POST для отправки сообщений (избегает 414 при длинных текстах),
+GET для получения данных. Поддерживает клавиатуры, файлы и вопросные клавиатуры.
 """
 
 import json
@@ -58,29 +58,7 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
-        """Отправка сообщения методом GET (классический способ, но может давать ошибку 414 при длинном URI)."""
-        params = {
-            "peer_id": peer_id,
-            "random_id": int(time.time() * 1000),
-        }
-        if text:
-            params["message"] = text
-        if attachment:
-            params["attachment"] = attachment
-        if keyboard:
-            params["keyboard"] = json.dumps(keyboard)
-
-        resp = await self._api_request("messages.send", params)
-        return resp[0]["message_id"] if isinstance(resp, list) else resp
-
-    async def send_message_post(
-        self,
-        peer_id: int,
-        text: str = "",
-        attachment: str = "",
-        keyboard: Optional[dict] = None,
-    ) -> int:
-        """Отправка сообщения методом POST (рекомендуется для длинных сообщений)."""
+        """Отправка сообщения методом POST (рекомендуется для длинных сообщений, избегает 414)."""
         payload = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -102,7 +80,7 @@ class VKClient:
             resp_data = data["response"]
             return (
                 resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
-            )
+           )
 
     async def send_question_keyboard(
         self, peer_id: int, header: str, question_text: str, options: List[dict]
@@ -170,9 +148,9 @@ class VKClient:
         doc_id = doc["id"]
         doc_owner_id = doc["owner_id"]
 
-        # 4. Отправить документ
+        # 4. Отправить документ (POST для избежания 414)
         attachment = f"doc{doc_owner_id}_{doc_id}"
-        params = {
+        payload = {
             "access_token": self.token,
             "v": self.api_version,
             "peer_id": peer_id,
@@ -180,9 +158,9 @@ class VKClient:
             "random_id": int(time.time() * 1000),
         }
         if caption:
-            params["message"] = caption
-        url = f"{self.BASE_URL}messages.send?{urlencode(params)}"
-        async with self.session.get(url) as resp:
+            payload["message"] = caption
+        url = f"{self.BASE_URL}messages.send"
+        async with self.session.post(url, data=payload) as resp:
             result = await resp.json()
         return result[0]["message_id"] if isinstance(result, list) else result
 
