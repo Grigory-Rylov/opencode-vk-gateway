@@ -1,6 +1,7 @@
 """
 Лонгполл слушатель VK
 """
+
 import asyncio
 import json
 import time
@@ -11,30 +12,52 @@ from urllib.parse import urlencode
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
 
+import vk_keyboards
 from config import (
-    OPENCODE_URL,
-    LONGPOLL_WAIT,
-    THINKING_PEER_ID,
-    MODELS,
-    DEFAULT_MODEL,
-    SESSION_FILE,
-    SCRIPT_DIR,
-    MODEL,
     ATTACHES_DIR,
+    DEFAULT_MODEL,
+    LONGPOLL_WAIT,
+    MODEL,
+    MODELS,
+    OPENCODE_URL,
+    SCRIPT_DIR,
+    SESSION_FILE,
+    THINKING_PEER_ID,
 )
+from llama_server import do_restart
 from logging_config import logger
 from message_parser import get_new_parts
 from models import model_to_api_format
 from nvidia import get_gpu_info_vk_message
-from opencode_process import OpenCodeProcess
 from opencode_client import OpenCodeClient
+from opencode_process import OpenCodeProcess
 from session_manager import SessionManager
 from vk_client import VKClient
-from llama_server import do_restart
-
 
 # Константы
 POLL_INTERVAL = 4  # интервал опроса сессии (секунды)
+
+
+def extract_command(text: str) -> str:
+    """
+    Извлекает команду из текста, игнорируя упоминания групп.
+    Форматы: '@club123 /help' или '[club123|@club123] /help'
+    """
+    text = text.strip()
+
+    # Если есть упоминание группы в формате [club...|@...] или [public...|@...]
+    if text.startswith("["):
+        end = text.find("]")
+        if end != -1:
+            return text[end + 1:].strip()
+
+    # Если есть упоминание группы @club... или @public...
+    if text.startswith("@"):
+        parts = text.split(None, 1)
+        if len(parts) > 1:
+            return parts[1].strip()
+
+    return text
 
 
 class VKLongPoll:
@@ -169,7 +192,9 @@ class VKLongPoll:
         text = part.text or ""
         # Если текст только из пробелов/переносов - не отправляем, но уже сохранено в просмотренные
         if not text.strip():
-            logger.debug(f"Skipping whitespace-only part: type={part.type}, id={part.id}")
+            logger.debug(
+                f"Skipping whitespace-only part: type={part.type}, id={part.id}"
+            )
             return
 
         if part.type == "tool":
@@ -223,8 +248,17 @@ class VKLongPoll:
         metadata = perm.get("metadata", {})
 
         # Извлекаем все возможные пути из metadata
-        filepath = metadata.get("filepath", "") or metadata.get("path", "") or metadata.get("file", "")
-        parent_dir = metadata.get("parentDir", "") or metadata.get("parent_dir", "") or metadata.get("directory", "") or metadata.get("dir", "")
+        filepath = (
+            metadata.get("filepath", "")
+            or metadata.get("path", "")
+            or metadata.get("file", "")
+        )
+        parent_dir = (
+            metadata.get("parentDir", "")
+            or metadata.get("parent_dir", "")
+            or metadata.get("directory", "")
+            or metadata.get("dir", "")
+        )
 
         # Формируем сообщение в зависимости от типа
         if perm_type == "external_directory":
@@ -249,25 +283,7 @@ class VKLongPoll:
 
     def _create_permission_keyboard(self) -> dict:
         """Создает клавиатуру для ответа на разрешение"""
-        return {
-            "inline": False,
-            "buttons": [
-                [
-                    {
-                        "action": {"type": "text", "label": "✅ Навсегда"},
-                        "color": "positive",
-                    },
-                    {
-                        "action": {"type": "text", "label": "🔄 Разово"},
-                        "color": "primary",
-                    },
-                    {
-                        "action": {"type": "text", "label": "❌ Никогда"},
-                        "color": "negative",
-                    },
-                ]
-            ],
-        }
+        return vk_keyboards.get_permission_keyboard()
 
     # ---------- Обработка вопросов ----------
     async def _check_questions(self, session_id: str, user_id: int):
@@ -312,12 +328,9 @@ class VKLongPoll:
         self.waiting_for_answer[user_id] = question_id
 
         try:
-            await self.vk.send_question_keyboard(
-                peer_id=user_id,
-                header=header,
-                question_text=question_text,
-                options=options,
-            )
+            keyboard = vk_keyboards.get_question_keyboard(options)
+            text = f"🔧 {header}\n\n{question_text}"
+            await self.vk.send_message(user_id, text, keyboard=keyboard)
             logger.info(f"Sent question {question_id} to user {user_id}")
         except Exception as e:
             logger.error(f"Failed to send question keyboard: {e}")
@@ -377,9 +390,17 @@ class VKLongPoll:
         """Обрабатывает ответ пользователя на вопрос"""
         success = await self.opencode_client.send_question_answer(question_id, answer)
         if success:
-            await self.vk.send_message(user_id, f"✅ Вы выбрали: {answer}")
+            await self.vk.send_message(
+                user_id,
+                f"✅ Вы выбрали: {answer}",
+                keyboard=vk_keyboards.get_main_keyboard(),
+            )
         else:
-            await self.vk.send_message(user_id, "❌ Ошибка отправки ответа")
+            await self.vk.send_message(
+                user_id,
+                "❌ Ошибка отправки ответа",
+                keyboard=vk_keyboards.get_main_keyboard(),
+            )
 
     # ---------- Обработка команд ----------
     async def _get_long_poll_events(self) -> Tuple[List[dict], int, Optional[int]]:
@@ -428,43 +449,49 @@ class VKLongPoll:
             logger.debug(f"Ignoring message from thinking_peer_id {peer_id}")
             return
 
-        # Обработка команд
-        if text.strip() == "/update":
+        # Извлекаем команду, убирая упоминание группы
+        cmd = extract_command(text)
+
+        if cmd == "/start":
+            return
+        if cmd == "/update":
+            return
+        if cmd == "/status":
             return
 
-        if text.strip().startswith("/restart") or text.strip().startswith("/r"):
-            await self._handle_restart_command(user_id, text)
+        if cmd.startswith("/restart") or cmd.startswith("/r"):
+            await self._handle_restart_command(user_id, cmd)
             return
 
-        if text.strip().startswith("/models") or text.strip() == "/m":
+        if cmd.startswith("/models") or cmd == "/m":
             await self._handle_models_command(user_id)
             return
 
-        if text.strip().startswith("/history"):
-            await self._handle_history_command(user_id, text)
+        if cmd.startswith("/history"):
+            await self._handle_history_command(user_id, cmd)
             return
 
-        if text.strip().startswith("/newsession") or text.strip() == "/n":
+        if cmd.startswith("/newsession") or cmd == "/n":
             await self._handle_new_session_command(user_id)
             return
 
-        if text.strip() == "/sessions":
+        if cmd == "/sessions":
             await self._handle_sessions_command(user_id)
             return
 
-        if text.strip().startswith("/logs"):
+        if cmd.startswith("/logs"):
             await self._handle_logs_command(user_id)
             return
 
-        if text.strip() == "/help":
+        if cmd == "/help":
             await self._send_help(user_id)
             return
 
-        if text.strip() == "/gpu":
+        if cmd == "/gpu":
             await self._handle_gpu_command(user_id)
             return
 
-        if text.strip() == "/clean_attaches":
+        if cmd == "/clean_attaches":
             await self._handle_clean_attaches_command(user_id)
             return
 
@@ -497,14 +524,12 @@ class VKLongPoll:
                 await self.opencode_client.send_permission_response(
                     perm_session_id, permission_id, response
                 )
-                empty_keyboard = {"buttons": [], "one_time": True}
                 await self.vk.edit_message(
                     peer_id=user_id,
                     message_id=perm_msg_id,
                     text=result_text,
-                    keyboard=empty_keyboard,
+                    keyboard=vk_keyboards.get_main_keyboard(),
                 )
-                await self.vk.send_message(user_id, result_text)
                 del self.pending_permissions[permission_id]
                 return
 
@@ -520,7 +545,9 @@ class VKLongPoll:
         text = message.get("text", "")
         attachments = message.get("attachments", [])
 
-        logger.debug(f"Message from {user_id}: text_len={len(text)}, attachments_count={len(attachments)}")
+        logger.debug(
+            f"Message from {user_id}: text_len={len(text)}, attachments_count={len(attachments)}"
+        )
 
         session_id = await self.session_mgr.get_or_create(user_id)
 
@@ -535,17 +562,21 @@ class VKLongPoll:
         # Обрабатываем аттачи
         attachment_info = ""
         if attachments:
-            logger.debug(f"Processing {len(attachments)} attachment(s) for user {user_id}")
+            logger.debug(
+                f"Processing {len(attachments)} attachment(s) for user {user_id}"
+            )
             for att in attachments:
                 logger.debug(f"Attachment type: {att.get('type')}")
-            downloaded = await self.vk.download_attachments(
-                attachments, ATTACHES_DIR
-            )
+            downloaded = await self.vk.download_attachments(attachments, ATTACHES_DIR)
             if downloaded:
                 attachment_info = self._format_attachment_info(downloaded)
-                logger.debug(f"Downloaded {len(downloaded)} attachments for user {user_id}")
+                logger.debug(
+                    f"Downloaded {len(downloaded)} attachments for user {user_id}"
+                )
             else:
-                logger.debug(f"No attachments were downloaded (count={len(attachments)})")
+                logger.debug(
+                    f"No attachments were downloaded (count={len(attachments)})"
+                )
 
         # Формируем полный текст с информацией об аттачах
         full_text = text
@@ -615,7 +646,9 @@ class VKLongPoll:
         """Отправляет историю сессии"""
         logger.info(f"Sending history for session {session_id} to user {user_id}")
         try:
-            messages = await self.opencode_client.get_session_messages(session_id, limit=50)
+            messages = await self.opencode_client.get_session_messages(
+                session_id, limit=50
+            )
             if not messages:
                 await self.vk.send_message(user_id, "❌ Не удалось получить историю")
                 return
@@ -775,7 +808,9 @@ class VKLongPoll:
                         # failed: 1 - история устарела, нужен новый ts
                         # failed: 2 - ключ истёк
                         # failed: 3 - информация потеряна
-                        logger.debug(f"Long poll key expired (failed={failed_code}), refreshing...")
+                        logger.debug(
+                            f"Long poll key expired (failed={failed_code}), refreshing..."
+                        )
                         await self._refresh_long_poll_server()
                         continue
 

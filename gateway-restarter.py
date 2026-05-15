@@ -132,28 +132,25 @@ def is_process_running(pid: int) -> bool:
         return False
 
 
-async def is_llama_server_running(llama_server_host: Optional[str]) -> bool:
-    """Проверяет, запущен ли llama-server на удалённом хосте."""
-    if not llama_server_host:
-        return True
-
-    try:
-        timeout = ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(llama_server_host) as resp:
-                return resp.status == 200
-    except Exception as e:
-        logger.warning(f"Failed to check llama-server status: {e}")
-        return False
+import system_status
 
 
 class LlamaServerMonitor:
     """Мониторит состояние llama-server и уведомляет при падении."""
 
-    def __init__(self, vk: 'VKClient', llama_server_host: Optional[str], check_interval: int = 30):
+    def __init__(
+        self,
+        vk: 'VKClient',
+        llama_server_host: Optional[str],
+        check_interval: int = 30,
+        retry_count: int = 3,
+        retry_delay: int = 10
+    ):
         self.vk = vk
         self.llama_server_host = llama_server_host
         self.check_interval = check_interval
+        self.retry_count = retry_count
+        self.retry_delay = retry_delay
         self._was_running = False
         self._running = False
 
@@ -175,17 +172,32 @@ class LlamaServerMonitor:
             if not self._running:
                 break
 
-            is_running = await is_llama_server_running(self.llama_server_host)
+            # Проверяем с retry логикой
+            is_running = False
+            last_error = None
+            for attempt in range(self.retry_count):
+                is_running, error = await system_status.is_llama_server_running(self.llama_server_host)
+                if is_running:
+                    break
+                last_error = error
+                if attempt < self.retry_count - 1:
+                    logger.warning(
+                        f"Llama-server check failed (attempt {attempt + 1}/{self.retry_count}): {error}. "
+                        f"Retrying in {self.retry_delay}s..."
+                    )
+                    await asyncio.sleep(self.retry_delay)
 
             if self._was_running and not is_running:
-                logger.warning("Llama-server is down!")
+                logger.warning(f"Llama-server is down! Last error: {last_error}")
                 try:
                     await self.vk.send_message(
                         notify_peer_id,
-                        "⚠️ Llama-server упал!"
+                        f"⚠️ Llama-server упал! Ошибка: {last_error}"
                     )
                 except Exception as e:
                     logger.error(f"Failed to send llama-server down notification: {e}")
+            elif not is_running:
+                logger.warning(f"Llama-server check failed but was not running before: {last_error}")
 
             self._was_running = is_running
             logger.debug(f"Llama-server check: running={is_running}")
@@ -261,8 +273,9 @@ def restart_gateway() -> Tuple[bool, Optional[str]]:
 
 
 class VKLongPollReloader:
-    def __init__(self, vk: VKClient):
+    def __init__(self, vk: VKClient, llama_server_host: Optional[str] = None):
         self.vk = vk
+        self.llama_server_host = llama_server_host
         self.server = None
         self.key = None
         self.ts = None
@@ -311,6 +324,8 @@ class VKLongPollReloader:
 
         if command in ("/update", "/start"):
             await self._handle_update_command(peer_id)
+        elif command == "/status":
+            await self._handle_status_command(peer_id)
         elif command == "/restart-help":
             await self._send_help(peer_id)
         elif command in ("/b", "/branch"):
@@ -335,6 +350,19 @@ class VKLongPollReloader:
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
 
+    async def _handle_status_command(self, peer_id: int):
+        """Обрабатывает команду /status."""
+        logger.info("Received /status command")
+        try:
+            status_msg = await system_status.get_status_message(self.llama_server_host)
+            await self.vk.send_message(peer_id, status_msg)
+        except Exception as e:
+            logger.error(f"Error handling /status: {e}")
+            try:
+                await self.vk.send_message(peer_id, f"❌ Ошибка: {e}")
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+
     async def _send_help(self, peer_id: int):
         """Отправляет справку."""
         help_text = """
@@ -342,6 +370,7 @@ class VKLongPollReloader:
 
 /update - Перезапустить main.py
 /start - То же что /update
+/status - Статус системы (RAM, диск, llama-server)
 
 /b <branch> - Переключиться на ветку
 /b <branch> -f - Форсированный чекаут (сбросить изменения и подтянуть с сервера)
@@ -520,7 +549,7 @@ async def main():
         monitor = LlamaServerMonitor(vk, llama_server_host, check_interval=30)
         monitor_task = asyncio.create_task(monitor.check_loop(notify_peer_id))
 
-        poller = VKLongPollReloader(vk)
+        poller = VKLongPollReloader(vk, llama_server_host)
         try:
             await poller.run()
         except (KeyboardInterrupt, asyncio.CancelledError):

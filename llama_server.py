@@ -15,6 +15,7 @@ from config import (
     SCRIPT_DIR,
     MCP_SERVERS,
     OPENCODE_CONFIG_PATH,
+    LLAMA_SERVER_PATH,
     load_config,
 )
 from logging_config import logger
@@ -33,7 +34,7 @@ async def restart_llama_server(
 ) -> bool:
     """Перезапускает llama server с указанной моделью."""
     if llama_path is None:
-        llama_path = LLAMA_SERVER_PATH
+        logger.error("llama_path is empty")
 
     if not llama_path:
         logger.info("llama-server not configured, skipping restart")
@@ -51,7 +52,7 @@ async def restart_llama_server(
     except Exception as e:
         logger.warning(f"Failed to kill llama server: {e}")
 
-    path = llama_path or LLAMA_SERVER_PATH
+    path = llama_path
     args = model.get("args", "")
     cmd = f"{path} {args}"
 
@@ -183,7 +184,7 @@ async def do_restart(
 
     # Перезапускаем llama server
     await vk_client.send_message(user_id, f"🔄 Загружаю модель {alias}...")
-    llama_success = await restart_llama_server(model, alias)
+    llama_success = await restart_llama_server(model, alias, LLAMA_SERVER_PATH)
     if not llama_success:
         await vk_client.send_message(user_id, "⚠️ Не удалось запустить llama server")
         logger.warning("Failed to restart llama server")

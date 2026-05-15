@@ -27,6 +27,7 @@ from vk_longpoll import VKLongPoll
 from vk_client import VKClient
 from llama_server import restart_llama_server
 from models import get_current_model, DEFAULT_MODEL
+import vk_keyboards
 
 
 async def main():
@@ -47,7 +48,7 @@ async def main():
                 logger.info("llama tmux session not found, starting with default model")
                 current_model = get_current_model()
                 if current_model:
-                    await restart_llama_server(current_model, DEFAULT_MODEL)
+                    await restart_llama_server(current_model, DEFAULT_MODEL, LLAMA_SERVER_PATH)
                 else:
                     logger.warning("No models configured, cannot start llama server")
         except Exception as e:
@@ -66,6 +67,7 @@ async def main():
             await vk.send_message(
                 PEER_ID,
                 f"🤖 OpenCode VK Gateway запущен\n\nModel: {MODEL}\nWorkdir: {SCRIPT_DIR}",
+                keyboard=vk_keyboards.get_main_keyboard(),
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")
