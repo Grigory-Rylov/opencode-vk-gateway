@@ -92,8 +92,7 @@ class VKLongPoll:
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
 
-        # Режим автоматического предоставления всех разрешений (session_id -> bool)
-        self.grant_mode: Dict[str, bool] = {}
+ 
 
     # ---------- Управление поллерами ----------
     async def _start_session_poller(self, user_id: int, session_id: str):
@@ -108,9 +107,6 @@ class VKLongPoll:
         )
         self.session_pollers[session_id] = poller_task
         self.user_session[user_id] = session_id
-        # Инициализируем grant_mode=False для новой сессии
-        if session_id not in self.grant_mode:
-            self.grant_mode[session_id] = False
 
     async def _stop_session_poller(self, session_id: str):
         """Останавливает поллер для сессии"""
@@ -849,7 +845,7 @@ class VKLongPoll:
         if len(parts) < 2:
             session_id = self.user_session.get(user_id)
             if session_id:
-                state = "ON" if self.grant_mode.get(session_id, False) else "OFF"
+                state = "ON" if self.session_mgr.get_grant_mode(session_id) else "OFF"
                 await self.vk.send_message(
                     user_id,
                     f"🔓 Режим авто-разрешений: **{state}**\n\nИспользование:\n`/grant true` — разрешить всё автоматически (постоянно)\n`/grant false` — запросить разрешения вручную",
@@ -876,7 +872,7 @@ class VKLongPoll:
             if user_id not in self.user_session:
                 self.user_session[user_id] = session_id
 
-        self.grant_mode[session_id] = value == "true"
+        self.session_mgr.set_grant_mode(session_id, value == "true")
 
         action = "🔓 Включён" if value == "true" else "🔒 Выключен"
         await self.vk.send_message(
