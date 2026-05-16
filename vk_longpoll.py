@@ -92,6 +92,8 @@ class VKLongPoll:
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
 
+ 
+
     # ---------- Управление поллерами ----------
     async def _start_session_poller(self, user_id: int, session_id: str):
         """Запускает поллер для конкретной сессии"""
@@ -105,9 +107,6 @@ class VKLongPoll:
         )
         self.session_pollers[session_id] = poller_task
         self.user_session[user_id] = session_id
-        # Инициализируем grant_mode=False для новой сессии
-        if session_id not in self.session_mgr.grant_mode:
-            self.session_mgr.set_grant_mode(session_id, False)
 
     async def _stop_session_poller(self, session_id: str):
         """Останавливает поллер для сессии"""
