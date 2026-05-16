@@ -92,6 +92,9 @@ class VKLongPoll:
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
 
+        # Режим автоматического предоставления всех разрешений (session_id -> bool)
+        self.grant_mode: Dict[str, bool] = {}
+
     # ---------- Управление поллерами ----------
     async def _start_session_poller(self, user_id: int, session_id: str):
         """Запускает поллер для конкретной сессии"""
@@ -105,6 +108,9 @@ class VKLongPoll:
         )
         self.session_pollers[session_id] = poller_task
         self.user_session[user_id] = session_id
+        # Инициализируем grant_mode=False для новой сессии
+        if session_id not in self.grant_mode:
+            self.grant_mode[session_id] = False
 
     async def _stop_session_poller(self, session_id: str):
         """Останавливает поллер для сессии"""
@@ -232,8 +238,22 @@ class VKLongPoll:
 
         self.seen_permissions[session_id].add(perm_id)
 
-        # Логируем полную структуру для отладки
-        logger.info(f"Permission request: {json.dumps(perm, ensure_ascii=False)}")
+        # Логируем запрос разрешения в debug
+        perm_type = perm.get("permission") or perm.get("action") or "unknown"
+        perm_path = perm.get("path") or perm.get("metadata", {}).get("filepath", "")
+        logger.debug(
+            f"Permission request: type={perm_type}, path={perm_path}, id={perm_id}"
+        )
+
+        # Если включён режим авто-разрешений — отвечаем разово без запроса
+        if self.grant_mode.get(session_id, False) and self.opencode_client:
+            logger.debug(
+                f"Auto-grant mode ON: approving permission {perm_id} ({perm_type})"
+            )
+            await self.opencode_client.send_permission_response(
+                perm_session_id, perm_id, "once"
+            )
+            return
 
         msg = self._format_permission_message(perm)
         keyboard = self._create_permission_keyboard()
@@ -550,6 +570,10 @@ class VKLongPoll:
             await self._handle_test_llama_command(user_id, cmd)
             return
 
+        if cmd.startswith("/grant"):
+            await self._handle_grant_command(user_id, cmd)
+            return
+
         # Обработка ответов на вопросы
         if user_id in self.waiting_for_answer:
             question_id = self.waiting_for_answer.pop(user_id)
@@ -819,6 +843,48 @@ class VKLongPoll:
             user_id, f"🗑️ Cleaned {file_count} file(s) from attaches folder"
         )
 
+    async def _handle_grant_command(self, user_id: int, cmd: str):
+        """Обрабатывает команду /grant - автоматическое предоставление всех разрешений"""
+        parts = cmd.split(None, 1)
+        if len(parts) < 2:
+            session_id = self.user_session.get(user_id)
+            if session_id:
+                state = "ON" if self.grant_mode.get(session_id, False) else "OFF"
+                await self.vk.send_message(
+                    user_id,
+                    f"🔓 Режим авто-разрешений: **{state}**\n\nИспользование:\n`/grant true` — разрешить всё автоматически\n`/grant false` — запросить разрешения вручную",
+                    keyboard=vk_keyboards.get_main_keyboard(),
+                )
+            else:
+                await self.vk.send_message(
+                    user_id, "⚠️ Нет активной сессии",
+                    keyboard=vk_keyboards.get_main_keyboard(),
+                )
+            return
+
+        value = parts[1].strip().lower()
+        if value not in ("true", "false"):
+            await self.vk.send_message(
+                user_id, "⚠️ Используете: `/grant true` или `/grant false`",
+                keyboard=vk_keyboards.get_main_keyboard(),
+            )
+            return
+
+        session_id = self.user_session.get(user_id)
+        if not session_id:
+            session_id = await self.session_mgr.get_or_create(user_id)
+            if user_id not in self.user_session:
+                self.user_session[user_id] = session_id
+
+        self.grant_mode[session_id] = value == "true"
+
+        action = "🔓 Включён" if value == "true" else "🔒 Выключен"
+        await self.vk.send_message(
+            user_id,
+            f"{action} режим авто-разрешений.\nПри включении все запросы разрешений будут автоматически одобрены разово.",
+            keyboard=vk_keyboards.get_main_keyboard(),
+        )
+
     async def _handle_test_llama_command(self, user_id: int, cmd: str):
         """Обрабатывает команду /test-llama - тест скорости инференса llama-server"""
         # Определяем URL для теста
@@ -853,7 +919,8 @@ class VKLongPoll:
 /models - Показать доступные модели
 /m - То же что /models
 /clean_attaches - Очистить папку с аттачами
-/help - Показать эту справку
+ /grant [true|false] - Авто-разрешение всех запросов (once)
+ /help - Показать эту справку
 /restart - Перезапустить с текущей моделью
 /restart <model> - Перезапустить с указанной моделью
 /r <model> - То же что /restart <model>
