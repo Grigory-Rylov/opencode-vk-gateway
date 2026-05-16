@@ -39,18 +39,12 @@ class SessionManager:
             self.grant_mode = {}
 
     def _save(self) -> None:
-        # Очищаем grant_mode от несуществующих сессий
-        valid_sessions = set(self.sessions.values())
-        grant_mode = {
-            sid: val for sid, val in self.grant_mode.items()
-            if sid in valid_sessions
-        }
         data = {
             "sessions": {str(k): v for k, v in self.sessions.items()},
             "seen_messages": {
                 sid: list(ids) for sid, ids in self.seen_messages.items()
             },
-            "grant_mode": grant_mode,
+            "grant_mode": dict(self.grant_mode),
         }
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -103,9 +97,7 @@ class SessionManager:
 
     def set_grant_mode(self, session_id: str, enabled: bool) -> None:
         """Устанавливает состояние режима авто-разрешений для сессии"""
-        # Не создаём запись для несуществующей сессии
-        if session_id not in self.sessions.values():
-            return
+        # BUG: не проверяет, существует ли сессия
         if session_id not in self.grant_mode:
             self.grant_mode[session_id] = False
         self.grant_mode[session_id] = enabled
