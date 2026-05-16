@@ -49,6 +49,10 @@ def get_main_keyboard() -> dict:
                     "action": {"type": "text", "label": "/models"},
                     "color": "secondary",
                 },
+                {
+                    "action": {"type": "text", "label": "/test-llama"},
+                    "color": "positive",
+                },
             ],
         ],
     }

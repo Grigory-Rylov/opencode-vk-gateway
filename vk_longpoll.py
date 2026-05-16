@@ -16,6 +16,8 @@ import vk_keyboards
 from config import (
     ATTACHES_DIR,
     DEFAULT_MODEL,
+    LLAMA_SERVER_PATH,
+    LLAMA_SERVER_HOST,
     LONGPOLL_WAIT,
     MODEL,
     MODELS,
@@ -24,7 +26,7 @@ from config import (
     SESSION_FILE,
     THINKING_PEER_ID,
 )
-from llama_server import do_restart
+from llama_server import do_restart, test_llama_server_speed
 from logging_config import logger
 from message_parser import get_new_parts
 from models import model_to_api_format
@@ -504,6 +506,10 @@ class VKLongPoll:
         if cmd == "/status":
             return
 
+        # Игнорируем команды gateway-restarter.py (не отправлять в OpenCode)
+        if cmd in ("/b", "/branch"):
+            return
+
         if cmd.startswith("/restart") or cmd.startswith("/r"):
             await self._handle_restart_command(user_id, cmd)
             return
@@ -538,6 +544,10 @@ class VKLongPoll:
 
         if cmd == "/clean_attaches":
             await self._handle_clean_attaches_command(user_id)
+            return
+
+        if cmd == "/test-llama":
+            await self._handle_test_llama_command(user_id, cmd)
             return
 
         # Обработка ответов на вопросы
@@ -808,6 +818,25 @@ class VKLongPoll:
         await self.vk.send_message(
             user_id, f"🗑️ Cleaned {file_count} file(s) from attaches folder"
         )
+
+    async def _handle_test_llama_command(self, user_id: int, cmd: str):
+        """Обрабатывает команду /test-llama - тест скорости инференса llama-server"""
+        # Определяем URL для теста
+        # Если есть аргумент - используем его, иначе URL из конфига
+        parts = cmd.split(None, 1)
+        if len(parts) > 1 and parts[1].startswith("http"):
+            llama_url = parts[1].rstrip("/")
+        else:
+            llama_url = LLAMA_SERVER_HOST.rstrip("/")
+        
+        await self.vk.send_message(user_id, "🔍 Тестирование llama-server...")
+        
+        speed, error = await test_llama_server_speed(llama_url)
+        
+        if error:
+            await self.vk.send_message(user_id, error, keyboard=vk_keyboards.get_main_keyboard())
+        else:
+            await self.vk.send_message(user_id, speed, keyboard=vk_keyboards.get_main_keyboard())
 
     async def _send_help(self, user_id: int):
         """Отправляет справку"""

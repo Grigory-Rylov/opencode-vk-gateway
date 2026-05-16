@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "thinking_peer_id": 2000000506,
     "model": "llama.cpp/qwen3.5-122b",
     "llama_server_path": "llama-server",
+    "llama_server_host": "http://localhost:8081",  # URL удалённого llama-server
     "opencode_config_path": "~/.config/opencode/opencode.json",
     "models": [],
     "default_model": "qwen3.5-122b",
@@ -62,6 +63,7 @@ MODEL = CONFIG.get("model")
 MODELS = CONFIG.get("models", {})
 DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", None)
+LLAMA_SERVER_HOST = CONFIG.get("llama_server_host", "http://localhost:8081")
 MCP_SERVERS = CONFIG.get("mcp_servers", {})
 
 if not VK_TOKEN:

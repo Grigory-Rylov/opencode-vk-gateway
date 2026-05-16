@@ -16,6 +16,7 @@ from config import (
     MCP_SERVERS,
     OPENCODE_CONFIG_PATH,
     LLAMA_SERVER_PATH,
+    LLAMA_SERVER_HOST,
     load_config,
 )
 from logging_config import logger
@@ -24,7 +25,6 @@ from config import load_config
 
 
 # Константы
-LLAMA_CHECK_URL = "http://localhost:8081/"
 LLAMA_STARTUP_TIMEOUT = 300  # секунд
 LLAMA_CHECK_INTERVAL = 5  # секунд
 
@@ -84,6 +84,9 @@ async def wait_for_llama_server(
     interval: int = LLAMA_CHECK_INTERVAL
 ) -> bool:
     """Ждёт готовности llama сервера."""
+    # Используем URL из конфига, добавляем / если нет
+    url = LLAMA_SERVER_HOST.rstrip("/") + "/"
+    
     waited = 0
 
     while waited < timeout:
@@ -91,7 +94,7 @@ async def wait_for_llama_server(
         waited += interval
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(LLAMA_CHECK_URL, timeout=2) as resp:
+                async with session.get(url, timeout=2) as resp:
                     if resp.status == 200:
                         return True
         except (aiohttp.ClientError, asyncio.TimeoutError):
@@ -145,6 +148,77 @@ def save_model_config(model_name: str, alias: str) -> bool:
     except Exception as e:
         logger.warning(f"Failed to save config: {e}")
         return False
+
+
+async def test_llama_server_speed(complete_url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Тестирует скорость инференса llama-server, отправляя короткий запрос.
+    
+    Args:
+        complete_url: Полный URL llama-server (например, http://192.168.1.212:8081)
+    
+    Returns:
+        Tuple[speed_string, error_message] - один из элементов будет None
+    """
+    if not complete_url:
+        return None, "❌ Не указан URL llama-server"
+    
+    # Убедимся, что URL не заканчивается на слеш
+    if complete_url.endswith("/"):
+        complete_url = complete_url.rstrip("/")
+    
+    test_url = f"{complete_url}/completion"
+    logger.info(f"Testing llama-server speed at {test_url}")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "prompt": "Test",
+                "n_predict": 10,
+                "stream": False,
+                "temperature": 0.7
+            }
+            
+            async with session.post(
+                test_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    return None, f"❌ Ошибка HTTP {resp.status}"
+                
+                data = await resp.json()
+                
+                if "timings" not in data:
+                    return None, "❌ В ответе нет информации о timing"
+                
+                timings = data["timings"]
+                predicted_ms = timings.get("predicted_ms", 0)
+                predicted_n = timings.get("predicted_n", 0)
+                model_name = data.get("model", "unknown")
+                
+                if predicted_n > 0:
+                    # Скорость в токенах в секунду
+                    tps = predicted_n / (predicted_ms / 1000)
+                    speed_string = (
+                        f"⚡ **Llama-server Speed Test**\n\n"
+                        f"📊 Модель: `{model_name}`\n"
+                        f"⏱️  Время генерации: {predicted_ms:.0f}ms\n"
+                        f"🔢 Токенов: {predicted_n}\n"
+                        f"🚀 Скорость: **{tps:.1f} tok/s**\n"
+                        f"⏳ На токен: {predicted_ms/predicted_n:.1f}ms"
+                    )
+                    return speed_string, None
+                else:
+                    return None, "❌ Не удалось получить количество токенов"
+                    
+    except asyncio.TimeoutError:
+        return None, "❌ Тайм-аут подключения"
+    except aiohttp.ClientError as e:
+        return None, f"❌ Ошибка подключения: {str(e)}"
+    except Exception as e:
+        logger.error(f"Error testing llama-server speed: {e}")
+        return None, f"❌ Ошибка: {str(e)}"
 
 
 async def do_restart(
