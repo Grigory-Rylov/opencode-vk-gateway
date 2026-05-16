@@ -241,45 +241,75 @@ class VKLongPoll:
         logger.info(f"Sent permission request {perm_id} to user {user_id}")
 
     def _format_permission_message(self, perm: dict) -> str:
-        """Форматирует сообщение для запроса разрешения"""
+        """Форматирует сообщение для запроса разрешения.
+
+        Поддерживает два формата API:
+        1. Legacy (старый opencode): {permission, metadata: {filepath, parentDir}}
+        2. Crush (новый): {tool_name, action, path} - путь на top-level
+        """
         import json
 
-        perm_type = perm.get("permission", "unknown")
-        metadata = perm.get("metadata", {})
+        # Поддержка обоих форматов API
+        perm_type = perm.get("permission") or perm.get("action") or "unknown"
+        tool_name = perm.get("tool_name", "")
 
-        # Извлекаем все возможные пути из metadata
-        filepath = (
-            metadata.get("filepath", "")
-            or metadata.get("path", "")
-            or metadata.get("file", "")
-        )
-        parent_dir = (
-            metadata.get("parentDir", "")
-            or metadata.get("parent_dir", "")
-            or metadata.get("directory", "")
-            or metadata.get("dir", "")
-        )
+        # Crush API: путь на top-level
+        path = perm.get("path", "")
+
+        # Legacy API: путь в metadata
+        if not path:
+            metadata = perm.get("metadata", {})
+            path = (
+                metadata.get("filepath")
+                or metadata.get("file")
+                or metadata.get("filePath")
+                or metadata.get("path")
+                or ""
+            )
+
+        # Legacy API: parent_dir для директорий
+        parent_dir = ""
+        if not parent_dir and perm_type == "external_directory":
+            metadata = perm.get("metadata", {})
+            parent_dir = (
+                metadata.get("parentDir")
+                or metadata.get("parent_dir")
+                or metadata.get("directory")
+                or metadata.get("dir")
+                or metadata.get("path")
+                or ""
+            )
 
         # Формируем сообщение в зависимости от типа
         if perm_type == "external_directory":
-            if parent_dir:
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории:\n`{parent_dir}`"
+            display_path = parent_dir or path
+            if display_path:
+                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории:\n`{display_path}`"
             else:
-                # Если путь не найден, показываем все metadata
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории.\n\nДанные: `{json.dumps(metadata, ensure_ascii=False)}`"
-        elif perm_type == "read_file":
-            if filepath:
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет прочитать файл:\n`{filepath}`"
+                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории.\n\nДанные: `{json.dumps(perm.get('metadata', {}), ensure_ascii=False)}`"
+        elif perm_type in ("write_file", "edit", "multi_edit"):
+            if path:
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет записать файл:\n`{path}`"
             else:
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет прочитать файл.\n\nДанные: `{json.dumps(metadata, ensure_ascii=False)}`"
-        elif perm_type == "write_file":
-            if filepath:
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет записать файл:\n`{filepath}`"
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет записать файл.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
+        elif perm_type in ("read_file", "view", "read"):
+            if path:
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет прочитать файл:\n`{path}`"
             else:
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет записать файл.\n\nДанные: `{json.dumps(metadata, ensure_ascii=False)}`"
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет прочитать файл.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
+        elif perm_type == "bash" or (tool_name == "bash"):
+            # Bash permissions - показываем команду из params
+            params = perm.get("params", {})
+            command = params.get("command", params.get("cmd", "")) if isinstance(params, dict) else ""
+            bash_path = path or params.get("working_directory", "") if isinstance(params, dict) else ""
+            display = command or bash_path
+            if display:
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `bash`\n\nПрограмма хочет выполнить команду:\n`{display}`"
+            else:
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `bash`\n\nПрограмма хочет выполнить команду.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
         else:
             # Для неизвестных типов показываем полную информацию
-            return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nДанные: `{json.dumps(metadata, ensure_ascii=False)}`\n\nПолный объект: `{json.dumps(perm, ensure_ascii=False)}`"
+            return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
 
     def _create_permission_keyboard(self) -> dict:
         """Создает клавиатуру для ответа на разрешение"""
