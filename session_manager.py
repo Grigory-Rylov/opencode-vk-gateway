@@ -68,6 +68,8 @@ class SessionManager:
                 self.sessions[user_id] = session_id
                 if session_id not in self.seen_messages:
                     self.seen_messages[session_id] = set()
+                if session_id not in self.grant_mode:
+                    self.grant_mode[session_id] = False
                 self._save()
                 logger.info(
                     f"Created OpenCode session {session_id} for user {user_id} with model {MODEL}"

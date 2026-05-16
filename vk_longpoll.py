@@ -242,13 +242,13 @@ class VKLongPoll:
             f"Permission request: type={perm_type}, path={perm_path}, id={perm_id}"
         )
 
-        # Если включён режим авто-разрешений — отвечаем разово без запроса
+        # Если включён режим авто-разрешений — отвечаем всегда без запроса
         if self.session_mgr.get_grant_mode(session_id) and self.opencode_client:
             logger.debug(
                 f"Auto-grant mode ON: approving permission {perm_id} ({perm_type})"
             )
             await self.opencode_client.send_permission_response(
-                perm_session_id, perm_id, "once"
+                perm_session_id, perm_id, "always"
             )
             return
 
@@ -849,7 +849,7 @@ class VKLongPoll:
                 state = "ON" if self.session_mgr.get_grant_mode(session_id) else "OFF"
                 await self.vk.send_message(
                     user_id,
-                    f"🔓 Режим авто-разрешений: **{state}**\n\nИспользование:\n`/grant true` — разрешить всё автоматически\n`/grant false` — запросить разрешения вручную",
+                    f"🔓 Режим авто-разрешений: **{state}**\n\nИспользование:\n`/grant true` — разрешить всё автоматически (постоянно)\n`/grant false` — запросить разрешения вручную",
                     keyboard=vk_keyboards.get_main_keyboard(),
                 )
             else:
@@ -878,7 +878,7 @@ class VKLongPoll:
         action = "🔓 Включён" if value == "true" else "🔒 Выключен"
         await self.vk.send_message(
             user_id,
-            f"{action} режим авто-разрешений.\nПри включении все запросы разрешений будут автоматически одобрены разово.",
+            f"{action} режим постоянных разрешений.\nПри включении все запросы разрешений будут автоматически одобрены.",
             keyboard=vk_keyboards.get_main_keyboard(),
         )
 
