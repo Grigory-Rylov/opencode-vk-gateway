@@ -270,9 +270,14 @@ class VKLongPoll:
                 or ""
             )
 
+        # Новый формат opencode API: external_directory с patterns
+        patterns = perm.get("patterns", [])
+        if isinstance(patterns, list) and patterns:
+            path = patterns[0]
+
         # Legacy API: parent_dir для директорий
         parent_dir = ""
-        if not parent_dir and perm_type == "external_directory":
+        if perm_type == "external_directory":
             metadata = perm.get("metadata", {})
             parent_dir = (
                 metadata.get("parentDir")
