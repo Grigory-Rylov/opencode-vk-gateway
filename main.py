@@ -73,6 +73,10 @@ async def main():
             logger.warning(f"Failed to send startup message: {e}")
 
         poller = VKLongPoll(vk, session_mgr, opencode_process)
+        
+        # Восстанавливаем workdir из сохранённых сессий (если есть)
+        await poller.initialize()
+        
         try:
             await poller.run()
         except KeyboardInterrupt:

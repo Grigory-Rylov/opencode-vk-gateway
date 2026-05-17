@@ -3,7 +3,7 @@
 """
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from aiohttp import ClientSession
 
@@ -20,6 +20,7 @@ class SessionManager:
         self.sessions: Dict[int, str] = {}
         self.seen_messages: Dict[str, set] = {}
         self.grant_mode: Dict[str, bool] = {}
+        self.session_workdir: Dict[str, str] = {}  # session_id -> workdir path
         self._load()
 
     def _load(self) -> None:
@@ -33,10 +34,14 @@ class SessionManager:
                 self.grant_mode = {
                     sid: bool(val) for sid, val in data.get("grant_mode", {}).items()
                 }
+                self.session_workdir = {
+                    sid: str(val) for sid, val in data.get("session_workdir", {}).items()
+                }
         except (FileNotFoundError, json.JSONDecodeError):
             self.sessions = {}
             self.seen_messages = {}
             self.grant_mode = {}
+            self.session_workdir = {}
 
     def _save(self) -> None:
         data = {
@@ -45,6 +50,7 @@ class SessionManager:
                 sid: list(ids) for sid, ids in self.seen_messages.items()
             },
             "grant_mode": dict(self.grant_mode),
+            "session_workdir": dict(self.session_workdir),
         }
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -103,3 +109,30 @@ class SessionManager:
         self.grant_mode[session_id] = enabled
         self._save()
         logger.debug(f"Grant mode for session {session_id}: {enabled}")
+
+    def set_session_workdir(self, session_id: str, workdir: Path) -> None:
+        """Устанавливает рабочую директорию для сессии"""
+        self.session_workdir[session_id] = str(workdir)
+        self._save()
+        logger.debug(f"Session {session_id} workdir: {workdir}")
+
+    def get_session_workdir(self, session_id: str) -> Optional[Path]:
+        """Получает рабочую директорию для сессии"""
+        path = self.session_workdir.get(session_id)
+        if path:
+            return Path(path)
+        return None
+
+    def remove_session(self, user_id: int):
+        """Удаляет сессию пользователя, включая workdir"""
+        if user_id in self.sessions:
+            session_id = self.sessions[user_id]
+            del self.sessions[user_id]
+            if session_id in self.seen_messages:
+                del self.seen_messages[session_id]
+            if session_id in self.grant_mode:
+                del self.grant_mode[session_id]
+            if session_id in self.session_workdir:
+                del self.session_workdir[session_id]
+            self._save()
+            logger.info(f"Removed session for user {user_id}")

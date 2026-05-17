@@ -73,3 +73,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 OPENCODE_BIN = Path(CONFIG["opencode_bin_path"])
 ATTACHES_DIR = SCRIPT_DIR / "attaches"
 OPENCODE_CONFIG_PATH = Path(CONFIG.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()
+
+
+def getCwd() -> Path:
+    """Возвращает текущую рабочую директорию процесса (не директорию скрипта)."""
+    return Path.cwd()

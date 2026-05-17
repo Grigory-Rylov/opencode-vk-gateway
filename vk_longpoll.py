@@ -25,6 +25,7 @@ from config import (
     SCRIPT_DIR,
     SESSION_FILE,
     THINKING_PEER_ID,
+    getCwd,
 )
 from llama_server import do_restart, test_llama_server_speed
 from logging_config import logger
@@ -92,7 +93,30 @@ class VKLongPoll:
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
 
- 
+    # ---------- Инициализация ----------
+    async def initialize(self) -> None:
+        """Инициализирует работу с существующими сессиями.
+        
+        Если у сессий есть сохранённый workdir — перезапускает opencode serve
+        с соответствующей рабочей директорией.
+        """
+        # Проверяем, есть ли сессии с workdir
+        sessions_with_workdir = {}
+        for session_id, workdir_path in self.session_mgr.session_workdir.items():
+            sessions_with_workdir[session_id] = Path(workdir_path)
+        
+        if sessions_with_workdir:
+            # Берём workdir из первой сессии (обычно один пользователь)
+            first_session_id = next(iter(sessions_with_workdir))
+            workdir = sessions_with_workdir[first_session_id]
+            logger.info(f"Found existing session with workdir: {workdir}")
+            
+            # Перезапускаем opencode serve с сохранённым workdir
+            try:
+                await self.opencode_process.restart(workdir=workdir)
+                logger.info(f"Restored opencode serve with workdir: {workdir}")
+            except Exception as e:
+                logger.warning(f"Failed to restore workdir on startup: {e}")
 
     # ---------- Управление поллерами ----------
     async def _start_session_poller(self, user_id: int, session_id: str):
@@ -526,6 +550,15 @@ class VKLongPoll:
         if cmd in ("/b", "/branch"):
             return
 
+        # /n и /newsession обрабатываются как команда бота, не отправляются модели
+        # cmd может быть "/n", "/n /path", "/newsession", "/newsession /path" (из группы)
+        if cmd == "/n" or cmd.startswith("/n ") or cmd.startswith("/newsession"):
+            # Извлекаем аргументы после команды (например, путь к директории)
+            parts = cmd.split(None, 1)
+            args = parts[1] if len(parts) > 1 else ""
+            await self._handle_new_session_command(user_id, args)
+            return
+
         if cmd.startswith("/restart") or cmd.startswith("/r"):
             await self._handle_restart_command(user_id, cmd)
             return
@@ -538,10 +571,7 @@ class VKLongPoll:
             await self._handle_history_command(user_id, cmd)
             return
 
-        if cmd.startswith("/newsession") or cmd == "/n":
-            await self._handle_new_session_command(user_id)
-            return
-
+ 
         if cmd == "/sessions":
             await self._handle_sessions_command(user_id)
             return
@@ -746,30 +776,80 @@ class VKLongPoll:
             logger.exception(f"Error sending history: {e}")
             await self.vk.send_message(user_id, f"❌ Ошибка отправки истории: {e}")
 
-    async def _handle_new_session_command(self, user_id: int):
-        """Обрабатывает команду /newsession"""
-        await self._new_session(user_id)
+    async def _handle_new_session_command(self, user_id: int, text: str = ""):
+        """Обрабатывает команду /newsession [workdir] или /n [workdir]
 
-    async def _new_session(self, user_id: int):
-        """Создает новую сессию, очищая все старые данные."""
-        logger.info(f"Creating new session for user {user_id}")
+        Без аргументов создаёт новую сессию с дефолтной рабочей директорией.
+        С аргументом — создаёт сессию с указанной директорией.
+        """
+        text = text.strip()
+        workdir = None
+        if text:
+            workdir_path = Path(text).expanduser()
+            if workdir_path.exists():
+                workdir = workdir_path
+                logger.info(f"/newsession: workdir argument = {workdir}")
+            else:
+                logger.warning(f"/newsession: workdir not found: {workdir_path}")
+                await self.vk.send_message(user_id, f"❌ Директория не найдена: {workdir_path}")
+        else:
+            # Без аргументов — используем текущую рабочую директорию процесса
+            workdir = getCwd()
+            logger.info(f"/newsession: no workdir specified, using cwd: {workdir}")
+        await self._new_session(user_id, workdir=workdir)
 
-        # Останавливаем все поллеры пользователя
+    async def _new_session(self, user_id: int, workdir: Path = None):
+        """Создает новую сессию с возможностью смены рабочей директории.
+
+        Args:
+            user_id: ID пользователя
+            workdir: Новая рабочая директория для opencode serve (опционально)
+        """
+        logger.info(f"Creating new session for user {user_id}" + (f" with workdir={workdir}" if workdir else ""))
+
+        # Останавливаем поллеры текущего пользователя
         await self._stop_user_poller(user_id)
 
-        # Удаляем файл сессий
-        if SESSION_FILE.exists():
-            SESSION_FILE.unlink()
+        # Удаляем старую сессию пользователя (если есть)
+        old_session_id = self.session_mgr.sessions.get(user_id)
+        if old_session_id:
+            self.session_mgr.remove_session(user_id)
+            logger.info(f"Removed old session {old_session_id} for user {user_id}")
 
-        # Очищаем все данные сессий
-        self.session_mgr.sessions.clear()
-        self.session_mgr.seen_messages.clear()
-        self.session_mgr._save()
+        # Очищаем временные данные ТОЛЬКО текущего пользователя
+        # Важно: не очищаем данные других пользователей!
+        # pending_permissions: (session_id, user_id, msg_id)
+        for perm_id in list(self.pending_permissions.keys()):
+            session_id, perm_user_id, _ = self.pending_permissions[perm_id]
+            if perm_user_id == user_id:
+                del self.pending_permissions[perm_id]
 
-        # Очищаем временные данные
-        self.pending_permissions.clear()
-        self.seen_permissions.clear()
-        self.seen_questions.clear()
+        # seen_permissions и seen_questions хранятся по session_id, не по user_id
+        # Их не трогаем — они относятся к конкретным сессиям, а не к пользователям
+        # При удалении сессии через _stop_user_poller поллер остановится корректно
+
+        # Если указана рабочая директория — перезапускаем opencode serve
+        # (если это не дефолтная директория, всё равно перезапускаем для чистоты)
+        if workdir:
+            if workdir == getCwd():
+                # Дефолтная директория — перезапускаем только если opencode запущен с другой директорией
+                current_opencode_workdir = getattr(self.opencode_process, "workdir", None)
+                if current_opencode_workdir and current_opencode_workdir != workdir:
+                    logger.info(f"Opencode running in different dir ({current_opencode_workdir}), restarting with {workdir}")
+                    await self.vk.send_message(
+                        user_id,
+                        f"🔄 Перезапуск opencode serve с рабочей директорией: {workdir}",
+                    )
+                    await self.opencode_process.restart(workdir=workdir)
+                else:
+                    logger.info(f"Using default workdir: {workdir}")
+            else:
+                await self.vk.send_message(
+                    user_id,
+                    f"🔄 Перезапуск opencode serve с рабочей директорией: {workdir}",
+                )
+                logger.info(f"Restarting opencode serve with new workdir: {workdir}")
+                await self.opencode_process.restart(workdir=workdir)
 
         # Создаем новую сессию через API
         new_session_id = await self.opencode_client.create_session()
@@ -777,14 +857,22 @@ class VKLongPoll:
         self.session_mgr.sessions[user_id] = new_session_id
         if new_session_id not in self.session_mgr.seen_messages:
             self.session_mgr.seen_messages[new_session_id] = set()
+        if new_session_id not in self.session_mgr.grant_mode:
+            self.session_mgr.grant_mode[new_session_id] = False
+
+        # Сохраняем рабочую директорию для новой сессии
+        if workdir:
+            self.session_mgr.set_session_workdir(new_session_id, workdir)
+
         self.session_mgr._save()
 
         await self._start_session_poller(user_id, new_session_id)
 
+        workdir_info = f"\nРабочая директория: {workdir}" if workdir else ""
         await self.vk.send_message(
             user_id,
             f"✅ Новая сессия создана: {new_session_id}\n"
-            f"Старые сессии и данные очищены.",
+            f"Старая сессия удалена.{workdir_info}",
         )
 
     async def _handle_sessions_command(self, user_id: int):
@@ -910,8 +998,9 @@ class VKLongPoll:
 /gpu - Показать информацию о GPU (nvidia-smi)
 /logs - Отправить файл логов
 /sessions - Показать список всех сессий
-/newsession - Создать новую сессию (очищает старые)
-/n - То же что /newsession
+/newsession [path] - Создать новую сессию (очищает старые)
+/n [path] - То же что /newsession
+/newsession /path/to/project - Смена рабочей директории opencode serve
 /models - Показать доступные модели
 /m - То же что /models
 /clean_attaches - Очистить папку с аттачами
