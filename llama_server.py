@@ -17,11 +17,12 @@ from config import (
     OPENCODE_CONFIG_PATH,
     LLAMA_SERVER_PATH,
     LLAMA_SERVER_HOST,
+    SESSION_FILE,
     load_config,
 )
 from logging_config import logger
 from models import get_model_by_alias, get_current_model
-from config import load_config
+from config import MODELS
 
 
 # Константы
@@ -104,9 +105,26 @@ async def wait_for_llama_server(
 
 
 def update_opencode_config(model: dict, alias: str) -> bool:
-    """Обновляет конфиг OpenCode с провайдером и MCP."""
+    """Обновляет конфиг OpenCode с провайдером и всеми доступными моделями."""
     try:
         opencode_config_path = OPENCODE_CONFIG_PATH
+
+        # Загружаем все модели из проекта, чтобы opencode знал о них всех
+        project_config = load_config()
+        all_models = project_config.get("models", {})
+        # Если models не найден в файле (или это список вместо словаря),
+        # используем глобальный MODELS из config.py как фоллбэк
+        if not isinstance(all_models, dict) or not all_models:
+            all_models = MODELS
+
+        # Строим словарь моделей для opencode - ВСЕ модели, не только текущая
+        opencode_models = {}
+        for model_alias, model_info in all_models.items():
+            opencode_models[model_alias] = {
+                "name": f"{model_alias} (local)",
+                "limit": {"context": 131072, "output": 65536},
+            }
+
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model.get("model", ""),
@@ -115,18 +133,14 @@ def update_opencode_config(model: dict, alias: str) -> bool:
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "llama-server (local)",
                     "options": {"baseURL": "http://localhost:8081/v1"},
-                    "models": {
-                        alias: {
-                            "name": f"{alias} (local)",
-                            "limit": {"context": 131072, "output": 65536},
-                        }
-                    },
+                    "models": opencode_models,
                 }
             },
         }
         if MCP_SERVERS:
             opencode_config["mcp"] = MCP_SERVERS
             logger.info(f"Added {len(MCP_SERVERS)} MCP server(s) to opencode config")
+        logger.info(f"Writing {len(opencode_models)} models to opencode config")
         with open(opencode_config_path, "w") as f:
             json.dump(opencode_config, f, indent=2)
         logger.info(f"Updated opencode config with provider and MCP for {alias}")
@@ -263,10 +277,7 @@ async def do_restart(
         await vk_client.send_message(user_id, "⚠️ Не удалось запустить llama server")
         logger.warning("Failed to restart llama server")
 
-    # Обновляем конфиг opencode с провайдером и MCP
-    update_opencode_config(model, alias)
-
-    # Ждем пока модель загрузится
+    # Ждем пока модель загрузится (важно: ждём ДО обновления конфига opencode)
     ready = await wait_for_llama_server()
 
     if ready:
@@ -278,7 +289,11 @@ async def do_restart(
         )
         logger.warning(f"Model {alias} did not respond in time")
 
-    # Перезапускаем opencode serve
+    # Обновляем конфиг opencode с провайдером и MCP (после того как llama-server готов)
+    # Это гарантирует что opencode увидит правильный конфиг при запуске
+    update_opencode_config(model, alias)
+
+    # Перезапускаем opencode serve (он прочитает новый конфиг)
     model_name = model.get("model", current_model)
     if opencode_process:
         await opencode_process.restart()
