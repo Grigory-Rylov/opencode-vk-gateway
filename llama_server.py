@@ -47,7 +47,7 @@ async def restart_llama_server(
 
     # Убиваем процесс llama-server на порту 8081
     try:
-        subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
+        subprocess.run(["pkill", "-9", "-f", llama_path], capture_output=True)
         logger.info("Killed existing llama-server processes")
         await asyncio.sleep(1)
     except Exception as e:
