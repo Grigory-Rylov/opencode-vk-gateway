@@ -4,7 +4,6 @@ VK Client - обёртка для VK API
 GET для получения данных. Поддерживает клавиатуры, файлы и вопросные клавиатуры.
 """
 
-import asyncio
 import json
 import logging
 import time
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from urllib.parse import urlencode
 
+import asyncio
 from aiohttp import ClientSession, ClientTimeout, FormData
 
 logger = logging.getLogger("vk-opencode")
@@ -39,11 +39,15 @@ class VKClient:
         params["access_token"] = self.token
         params["v"] = self.api_version
         url = f"{self.BASE_URL}{method}?{urlencode(params)}"
-        async with self.session.get(url) as resp:
-            data = await resp.json()
-            if "error" in data:
-                raise Exception(f"VK API error: {data['error']}")
-            return data["response"]
+        try:
+            async with self.session.get(url) as resp:
+                data = await resp.json()
+                if "error" in data:
+                    raise Exception(f"VK API error: {data['error']}")
+                return data["response"]
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"VK API request failed ({method}): {e}")
+            raise
 
     async def get_long_poll_server(self) -> Tuple[str, str, int]:
         resp = await self._api_request("messages.getLongPollServer", {})

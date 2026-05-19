@@ -518,6 +518,16 @@ class VKLongPoll:
         self.server, self.key, self.ts = await self.vk.get_long_poll_server()
         logger.info(f"Long Poll server refreshed: {self.server}")
 
+    async def _refresh_long_poll_server_with_retry(self):
+        """Обновляет сервер long poll с ретраем при ошибке соединения (каждые 30 сек)"""
+        while self.running:
+            try:
+                await self._refresh_long_poll_server()
+                return
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                logger.warning(f"Failed to refresh long poll server: {e}. Retrying in 30 seconds...")
+                await asyncio.sleep(30)
+
     async def _handle_message_new(self, event: list):
         """Обрабатывает новое сообщение"""
         msg_id = int(event[1])
@@ -1024,7 +1034,7 @@ class VKLongPoll:
         await self.opencode_client.__aenter__()
 
         try:
-            await self._refresh_long_poll_server()
+            await self._refresh_long_poll_server_with_retry()
 
             while self.running:
                 try:
@@ -1037,7 +1047,7 @@ class VKLongPoll:
                         logger.debug(
                             f"Long poll key expired (failed={failed_code}), refreshing..."
                         )
-                        await self._refresh_long_poll_server()
+                        await self._refresh_long_poll_server_with_retry()
                         continue
 
                     self.ts = new_ts
@@ -1049,13 +1059,11 @@ class VKLongPoll:
                 except asyncio.CancelledError:
                     break
                 except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                    logger.warning(f"Long poll error: {e}. Reconnecting...")
-                    await asyncio.sleep(3)
-                    await self._refresh_long_poll_server()
+                    logger.warning(f"Long poll error: {e}. Reconnecting in 30 seconds...")
+                    await self._refresh_long_poll_server_with_retry()
                 except Exception as e:
                     logger.exception(f"Long poll error: {e}")
-                    await asyncio.sleep(3)
-                    await self._refresh_long_poll_server()
+                    await self._refresh_long_poll_server_with_retry()
         finally:
             await self.opencode_client.__aexit__(None, None, None)
 
