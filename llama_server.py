@@ -121,8 +121,7 @@ def update_opencode_config(model: dict, alias: str) -> bool:
         opencode_models = {}
         for model_alias, model_info in all_models.items():
             opencode_models[model_alias] = {
-                "name": f"{model_alias} (local)",
-                "limit": {"context": 131072, "output": 65536},
+                "name": model_alias,
             }
 
         opencode_config = {
@@ -132,7 +131,7 @@ def update_opencode_config(model: dict, alias: str) -> bool:
                 "llama.cpp": {
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "llama-server (local)",
-                    "options": {"baseURL": "http://localhost:8081/v1"},
+                    "options": {"baseURL": f"{LLAMA_SERVER_HOST}/v1"},
                     "models": opencode_models,
                 }
             },
