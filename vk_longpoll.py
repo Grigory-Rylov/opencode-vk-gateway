@@ -90,7 +90,7 @@ class VKLongPoll:
         self.parent_child_map: Dict[str, Dict[str, dict]] = {}  # parent_id -> {child_id: {title, no_new, notified_start}}
 
         # Временные хранилища
-        self.waiting_for_answer: Dict[int, str] = {}
+        self.    waiting_for_answer: Dict = {}  # user_id -> question_id или (peer_id, child_id) -> question_id
         self.pending_permissions: Dict[str, Tuple[str, int, int]] = {}
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
@@ -103,11 +103,17 @@ class VKLongPoll:
             return
 
         logger.debug(f"Starting poller for session {session_id} (user {user_id})")
+        target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
         poller_task = asyncio.create_task(
             self._poll_session_messages(user_id, session_id)
         )
         self.session_pollers[session_id] = poller_task
         self.user_session[user_id] = session_id
+
+        # Сразу проверяем существующие child сессии при старте поллера
+        asyncio.create_task(
+            self._init_child_sessions(session_id, user_id, target_peer)
+        )
 
     async def _stop_session_poller(self, session_id: str):
         """Останавливает поллер для сессии и все дочерние поллеры"""
@@ -130,6 +136,17 @@ class VKLongPoll:
             del self.user_session[user_id]
 
     # ---------- Управление child поллерами ----------
+    async def _init_child_sessions(self, parent_id: str, user_id: int, target_peer: int):
+        """При старте поллера проверяет активные child сессии из сохранённых и API"""
+        # Сначала ищем живые child сессии через API
+        new_children = await self._discover_new_child_sessions(parent_id, user_id, target_peer)
+        if new_children:
+            for child in new_children:
+                child_id = child["id"]
+                await self._start_child_poller(
+                    child_id, parent_id, user_id, target_peer, child
+                )
+
     async def _start_child_poller(
         self, child_id: str, parent_id: str, user_id: int, target_peer: int, child_info: dict
     ):
@@ -349,21 +366,6 @@ class VKLongPoll:
         """Отправляет новые части сообщений с префиксом"""
         for part in parts:
             await self._send_part_by_type(part, user_id, target_peer, prefix)
-
-    async def _send_part_by_type_prefixed(
-        self, part, user_id: int, target_peer: int, prefix: str = ""
-    ):
-        """Отправляет часть сообщения с префиксом (для дочерних сессий)"""
-        text = part.text or ""
-        if not text.strip():
-            return
-
-        if part.type == "tool":
-            await self.vk.send_message(target_peer, f"{prefix}🧠: Tool\n{text}")
-        elif part.type == "reasoning":
-            await self.vk.send_message(target_peer, f"{prefix}🧠:\n{text}")
-        else:
-            await self.vk.send_message(user_id, f"{prefix}{text}")
 
     async def _discover_new_child_sessions(
         self, parent_id: str, user_id: int, target_peer: int
@@ -796,7 +798,8 @@ class VKLongPoll:
         else:
             await self.vk.send_message(target_peer, f"{msg}\n\nОтветьте текстом")
 
-        self.waiting_for_answer[target_peer] = q_id
+        # Ключ (target_peer, child_id) чтобы не было конфликта с родительскими вопросами
+        self.waiting_for_answer[(target_peer, child_id)] = q_id
         logger.info(f"Sent child question {q_id} for subagent {child_title}")
 
     async def _handle_question_answer(
@@ -942,11 +945,19 @@ class VKLongPoll:
             await self._handle_grant_command(user_id, cmd)
             return
 
-        # Обработка ответов на вопросы
+        # Обработка ответов на вопросы (родительские и дочерние)
+        # Сначала проверяем parent (int ключ)
         if user_id in self.waiting_for_answer:
             question_id = self.waiting_for_answer.pop(user_id)
             await self._handle_question_answer(user_id, question_id, text)
             return
+
+        # Проверяем child вопросы (кортеж ключ (peer_id, child_id))
+        for key in list(self.waiting_for_answer.keys()):
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == user_id:
+                question_id = self.waiting_for_answer.pop(key)
+                await self._handle_question_answer(user_id, question_id, text)
+                return
 
         # Обработка ответов на разрешения
         for permission_id, perm_data in list(self.pending_permissions.items()):
@@ -1195,6 +1206,12 @@ class VKLongPoll:
         # seen_permissions и seen_questions хранятся по session_id, не по user_id
         # Их не трогаем — они относятся к конкретным сессиям, а не к пользователям
         # При удалении сессии через _stop_user_poller поллер остановится корректно
+
+        # Очищаем parent_child_map для старой сессии пользователя
+        if old_session_id and old_session_id in self.parent_child_map:
+            for child_id in list(self.parent_child_map[old_session_id].keys()):
+                self.session_mgr.remove_child_session(child_id)
+            del self.parent_child_map[old_session_id]
 
         # Если указана рабочая директория — перезапускаем opencode serve
         # (если это не дефолтная директория, всё равно перезапускаем для чистоты)
