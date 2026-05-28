@@ -95,11 +95,15 @@ class OpenCodeProcess:
     async def stop(self):
         if self.process:
             self.logger.info(f"Stopping opencode serve, pid={self.process.pid}")
+            pid = self.process.pid
             self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            for _ in range(50):  # до 5 секунд с проверками
+                if self.process.poll() is not None:
+                    break
+                await asyncio.sleep(0.1)
+            if self.process.poll() is None:
+                self.logger.warning("opencode didn't stop gracefully, killing")
                 self.process.kill()
                 self.process.wait()
-            self.logger.info("opencode serve stopped")
+            self.logger.info(f"opencode serve stopped (pid={pid})")
             self.process = None

@@ -17,7 +17,7 @@ from config import (
     OPENCODE_CONFIG_PATH,
     LLAMA_SERVER_PATH,
     LLAMA_SERVER_HOST,
-    SESSION_FILE,
+  
     load_config,
 )
 from logging_config import logger
@@ -163,12 +163,13 @@ def save_model_config(model_name: str, alias: str) -> bool:
         return False
 
 
-async def test_llama_server_speed(complete_url: str) -> Tuple[Optional[str], Optional[str]]:
+async def test_llama_server_speed(complete_url: str, model_name: str = None) -> Tuple[Optional[str], Optional[str]]:
     """
     Тестирует скорость инференса llama-server, отправляя короткий запрос.
     
     Args:
         complete_url: Полный URL llama-server (например, http://192.168.1.212:8081)
+        model_name: Имя модели для отправки в запросе (опционально)
     
     Returns:
         Tuple[speed_string, error_message] - один из элементов будет None
@@ -189,8 +190,10 @@ async def test_llama_server_speed(complete_url: str) -> Tuple[Optional[str], Opt
                 "prompt": "Test",
                 "n_predict": 10,
                 "stream": False,
-                "temperature": 0.7
+                "temperature": 0.7,
             }
+            if model_name:
+                payload["model"] = model_name
             
             async with session.post(
                 test_url,
@@ -246,6 +249,16 @@ async def do_restart(
     """
     Выполняет перезапуск с указанной моделью или текущей.
 
+    Последовательность:
+    1) llama server restart (если LLAMA_SERVER_PATH указан)
+    2) Ждём llama ready
+    3) stop opencode (убиваем старый процесс)
+    4) update_opencode_config (пишем новый конфиг)
+    5) start opencode (запускаем с новым конфигом)
+    6) save_model_config (сохраняем в config.json бота)
+    7) reload config (обновляем MODEL в памяти)
+    8) clean sessions
+
     Args:
         vk_client: Клиент VK для отправки сообщений
         user_id: ID пользователя
@@ -269,14 +282,14 @@ async def do_restart(
             return None, "Нет доступных моделей"
         alias = current_default or "default"
 
-    # Перезапускаем llama server
+    # Шаг 1: llama server
     await vk_client.send_message(user_id, f"🔄 Загружаю модель {alias}...")
     llama_success = await restart_llama_server(model, alias, LLAMA_SERVER_PATH)
     if not llama_success:
         await vk_client.send_message(user_id, "⚠️ Не удалось запустить llama server")
         logger.warning("Failed to restart llama server")
 
-    # Ждем пока модель загрузится (важно: ждём ДО обновления конфига opencode)
+    # Шаг 2: Ждём llama ready
     ready = await wait_for_llama_server()
 
     if ready:
@@ -288,25 +301,31 @@ async def do_restart(
         )
         logger.warning(f"Model {alias} did not respond in time")
 
-    # Обновляем конфиг opencode с провайдером и MCP (после того как llama-server готов)
-    # Это гарантирует что opencode увидит правильный конфиг при запуске
+    # Шаг 3: Убиваем старый opencode процесс
+    if opencode_process:
+        await opencode_process.stop()
+
+    # Шаг 4: Пишем новый конфиг opencode (после того как процесс убит — точно прочитает новый)
     update_opencode_config(model, alias)
 
-    # Перезапускаем opencode serve (он прочитает новый конфиг)
+    # Шаг 5: Запускаем новый opencode (прочитает новый конфиг)
     model_name = model.get("model", current_model)
     if opencode_process:
-        await opencode_process.restart()
+        await opencode_process.start()
 
-    # Очищаем сессию после переключения модели
+    # Шаг 6: Сохраняем в config.json бота
+    save_model_config(model_name, alias)
+
+    # Шаг 7: Обновляем MODEL в памяти
+    import importlib
+    import config
+    importlib.reload(config)
+
+    # Шаг 8: Очищаем сессии текущего пользователя
     if session_mgr:
         session_mgr.remove(user_id)
-    if SESSION_FILE.exists():
-        SESSION_FILE.unlink()
         logger.info(
-            f"Cleared session for user {user_id} and deleted sessions file after model switch to {alias}"
+            f"Cleared session for user {user_id} after model switch to {alias}"
         )
-
-    # Сохраняем в config
-    save_model_config(model_name, alias)
 
     return model_name, None

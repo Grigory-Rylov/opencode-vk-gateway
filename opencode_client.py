@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 from aiohttp import ClientSession, ClientTimeout
 
-from config import OPENCODE_URL, MODEL
+import config
 from logging_config import logger
 from models import model_to_api_format
 
@@ -20,7 +20,7 @@ class OpenCodeClient:
     """HTTP клиент для работы с OpenCode API."""
 
     def __init__(self, base_url: str = None):
-        self.base_url = base_url or OPENCODE_URL
+        self.base_url = base_url or config.OPENCODE_URL
         self._session: Optional[ClientSession] = None
 
     async def __aenter__(self):
@@ -39,9 +39,9 @@ class OpenCodeClient:
 
     # ---------- Сессии ----------
 
-    async def create_session(self) -> str:
+    async def create_session(self, model: str = None) -> str:
         """Создаёт новую сессию и возвращает её ID."""
-        data = model_to_api_format(MODEL)
+        data = model_to_api_format(model or config.MODEL)
         async with self.session.post(f"{self.base_url}/session", json=data) as resp:
             resp.raise_for_status()
             resp_data = await resp.json()

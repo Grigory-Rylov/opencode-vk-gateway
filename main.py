@@ -10,11 +10,11 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+import config as bot_config
 from config import (
     SESSION_FILE,
     LLAMA_SERVER_PATH,
     PEER_ID,
-    MODEL,
     SCRIPT_DIR,
     args,
     VK_TOKEN,
@@ -26,7 +26,8 @@ from session_manager import SessionManager
 from vk_longpoll import VKLongPoll
 from vk_client import VKClient
 from llama_server import restart_llama_server
-from models import get_current_model, DEFAULT_MODEL
+from models import get_current_model
+from config import DEFAULT_MODEL
 import vk_keyboards
 
 
@@ -56,7 +57,14 @@ async def main():
     else:
         logger.info("LLAMA_SERVER_PATH not set, skipping llama server check")
 
-    opencode_process = OpenCodeProcess(model=MODEL, workdir=SCRIPT_DIR)
+    # Определяем workdir: сначала из сохранённых сессий, иначе SCRIPT_DIR
+    workdir = SCRIPT_DIR
+    if session_mgr.session_workdir:
+        first_session_id = next(iter(session_mgr.session_workdir))
+        workdir = Path(session_mgr.session_workdir[first_session_id])
+        logger.info(f"Restored workdir from session {first_session_id}: {workdir}")
+
+    opencode_process = OpenCodeProcess(model=bot_config.MODEL, workdir=workdir)
     logger.info(f"OpenCodeProcess created with workdir={opencode_process.workdir}")
     await opencode_process.start()
 
@@ -66,16 +74,13 @@ async def main():
         try:
             await vk.send_message(
                 PEER_ID,
-                f"🤖 OpenCode VK Gateway запущен\n\nModel: {MODEL}\nWorkdir: {SCRIPT_DIR}",
+                f"🤖 OpenCode VK Gateway запущен\n\nModel: {bot_config.MODEL}\nWorkdir: {workdir}",
                 keyboard=vk_keyboards.get_main_keyboard(),
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")
 
         poller = VKLongPoll(vk, session_mgr, opencode_process)
-        
-        # Восстанавливаем workdir из сохранённых сессий (если есть)
-        await poller.initialize()
         
         try:
             await poller.run()

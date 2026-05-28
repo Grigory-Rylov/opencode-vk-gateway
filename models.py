@@ -1,21 +1,21 @@
 """
 Функции для работы с моделями
 """
-from config import MODELS, DEFAULT_MODEL
+import config
 
 
 def get_current_model():
     """Возвращает текущую модель из конфига."""
-    if not MODELS:
+    if not config.MODELS:
         return None
-    return MODELS.get(DEFAULT_MODEL)
+    return config.MODELS.get(config.DEFAULT_MODEL)
 
 
 def get_model_by_alias(alias: str):
     """Возвращает модель по алиасу."""
-    if not MODELS:
+    if not config.MODELS:
         return None
-    return MODELS.get(alias)
+    return config.MODELS.get(alias)
 
 
 def model_to_api_format(model: str) -> dict:

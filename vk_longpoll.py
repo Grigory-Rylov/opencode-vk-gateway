@@ -13,15 +13,12 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout
 
 import vk_keyboards
+import config as bot_config
 from config import (
     ATTACHES_DIR,
-    DEFAULT_MODEL,
     LLAMA_SERVER_PATH,
     LLAMA_SERVER_HOST,
     LONGPOLL_WAIT,
-    MODEL,
-    MODELS,
-    OPENCODE_URL,
     SCRIPT_DIR,
     SESSION_FILE,
     THINKING_PEER_ID,
@@ -30,7 +27,7 @@ from config import (
 from llama_server import do_restart, test_llama_server_speed
 from logging_config import logger
 from message_parser import get_new_parts
-from models import model_to_api_format
+from models import get_current_model, model_to_api_format
 from nvidia import get_gpu_info_vk_message
 from opencode_client import OpenCodeClient
 from opencode_process import OpenCodeProcess
@@ -92,31 +89,6 @@ class VKLongPoll:
         self.pending_permissions: Dict[str, Tuple[str, int, int]] = {}
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
-
-    # ---------- Инициализация ----------
-    async def initialize(self) -> None:
-        """Инициализирует работу с существующими сессиями.
-        
-        Если у сессий есть сохранённый workdir — перезапускает opencode serve
-        с соответствующей рабочей директорией.
-        """
-        # Проверяем, есть ли сессии с workdir
-        sessions_with_workdir = {}
-        for session_id, workdir_path in self.session_mgr.session_workdir.items():
-            sessions_with_workdir[session_id] = Path(workdir_path)
-        
-        if sessions_with_workdir:
-            # Берём workdir из первой сессии (обычно один пользователь)
-            first_session_id = next(iter(sessions_with_workdir))
-            workdir = sessions_with_workdir[first_session_id]
-            logger.info(f"Found existing session with workdir: {workdir}")
-            
-            # Перезапускаем opencode serve с сохранённым workdir
-            try:
-                await self.opencode_process.restart(workdir=workdir)
-                logger.info(f"Restored opencode serve with workdir: {workdir}")
-            except Exception as e:
-                logger.warning(f"Failed to restore workdir on startup: {e}")
 
     # ---------- Управление поллерами ----------
     async def _start_session_poller(self, user_id: int, session_id: str):
@@ -721,29 +693,55 @@ class VKLongPoll:
         parts = text.strip().split()
         model_alias = parts[1] if len(parts) > 1 else None
 
+        # Сохраняем текущий workdir до удаления сессии
+        old_session_id = self.session_mgr.sessions.get(user_id)
+        saved_workdir = None
+        if old_session_id:
+            saved_workdir = self.session_mgr.get_session_workdir(old_session_id)
+        # Если нет workdir в сессии, берем из opencode_process
+        if not saved_workdir:
+            saved_workdir = getattr(self.opencode_process, "workdir", None)
+
         model_info, error = await do_restart(
             self.vk,
             user_id,
             model_alias,
             opencode_process=self.opencode_process,
             session_mgr=self.session_mgr,
-            current_model=MODEL,
-            current_default=DEFAULT_MODEL,
+            current_model=bot_config.MODEL,
+            current_default=bot_config.DEFAULT_MODEL,
         )
 
         if error:
             await self.vk.send_message(user_id, f"❌ {error}")
         else:
+            # Создаем новую сессию с сохранением workdir
+            if saved_workdir:
+                self.opencode_process.workdir = saved_workdir
+
+            new_session_id = await self.opencode_client.create_session()
+            self.session_mgr.sessions[user_id] = new_session_id
+            if new_session_id not in self.session_mgr.seen_messages:
+                self.session_mgr.seen_messages[new_session_id] = set()
+            if new_session_id not in self.session_mgr.grant_mode:
+                self.session_mgr.grant_mode[new_session_id] = False
+            if saved_workdir:
+                self.session_mgr.set_session_workdir(new_session_id, saved_workdir)
+            self.session_mgr._save()
+
+            await self._stop_user_poller(user_id)
+            await self._start_session_poller(user_id, new_session_id)
+
             await self.vk.send_message(user_id, f"✅ Модель {model_info} загружена")
 
     async def _handle_models_command(self, user_id: int):
         """Обрабатывает команду /models"""
-        if not MODELS:
+        if not bot_config.MODELS:
             await self.vk.send_message(user_id, "Нет доступных моделей")
         else:
             models_text = "📋 **Доступные модели:**\n\n"
-            for alias, m in MODELS.items():
-                marker = " ← текущая" if alias == DEFAULT_MODEL else ""
+            for alias, m in bot_config.MODELS.items():
+                marker = " ← текущая" if alias == bot_config.DEFAULT_MODEL else ""
                 models_text += f"• {alias}{marker}\n"
             await self.vk.send_message(user_id, models_text)
 
@@ -989,9 +987,13 @@ class VKLongPoll:
         else:
             llama_url = LLAMA_SERVER_HOST.rstrip("/")
         
+        # Берём текущую модель для отправки в запросе
+        current_model = get_current_model()
+        model_name = current_model.get("model") if current_model else None
+        
         await self.vk.send_message(user_id, "🔍 Тестирование llama-server...")
         
-        speed, error = await test_llama_server_speed(llama_url)
+        speed, error = await test_llama_server_speed(llama_url, model_name)
         
         if error:
             await self.vk.send_message(user_id, error, keyboard=vk_keyboards.get_main_keyboard())
