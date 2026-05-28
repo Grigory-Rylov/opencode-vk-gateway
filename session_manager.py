@@ -3,7 +3,7 @@
 """
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from aiohttp import ClientSession
 
@@ -21,6 +21,7 @@ class SessionManager:
         self.seen_messages: Dict[str, set] = {}
         self.grant_mode: Dict[str, bool] = {}
         self.session_workdir: Dict[str, str] = {}  # session_id -> workdir path
+        self.child_sessions: Dict[str, str] = {}  # child_session_id -> parent_session_id
         self._load()
 
     def _load(self) -> None:
@@ -37,11 +38,15 @@ class SessionManager:
                 self.session_workdir = {
                     sid: str(val) for sid, val in data.get("session_workdir", {}).items()
                 }
+                self.child_sessions = {
+                    sid: str(val) for sid, val in data.get("child_sessions", {}).items()
+                }
         except (FileNotFoundError, json.JSONDecodeError):
             self.sessions = {}
             self.seen_messages = {}
             self.grant_mode = {}
             self.session_workdir = {}
+            self.child_sessions = {}
 
     def _save(self) -> None:
         data = {
@@ -51,6 +56,7 @@ class SessionManager:
             },
             "grant_mode": dict(self.grant_mode),
             "session_workdir": dict(self.session_workdir),
+            "child_sessions": dict(self.child_sessions),
         }
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -124,7 +130,7 @@ class SessionManager:
         return None
 
     def remove_session(self, user_id: int):
-        """Удаляет сессию пользователя, включая workdir"""
+        """Удаляет сессию пользователя, включая workdir и дочерние сессии"""
         if user_id in self.sessions:
             session_id = self.sessions[user_id]
             del self.sessions[user_id]
@@ -134,5 +140,34 @@ class SessionManager:
                 del self.grant_mode[session_id]
             if session_id in self.session_workdir:
                 del self.session_workdir[session_id]
+
+            # Удаляем записи о дочерних сессиях
+            for child_id in list(self.child_sessions.keys()):
+                if self.child_sessions[child_id] == session_id:
+                    del self.child_sessions[child_id]
+
             self._save()
             logger.info(f"Removed session for user {user_id}")
+
+    # ---------- Child sessions ----------
+
+    def get_child_sessions(self, parent_id: str) -> List[str]:
+        """Получает список дочерних сессий для родительской сессии"""
+        return [child_id for child_id, par_id in self.child_sessions.items() if par_id == parent_id]
+
+    def is_child_of(self, session_id: str, parent_id: str) -> bool:
+        """Проверяет, является ли сессия дочерней для указанной родительской"""
+        return self.child_sessions.get(session_id) == parent_id
+
+    def register_child_session(self, child_session_id: str, parent_session_id: str) -> None:
+        """Регистрирует дочернюю сессию"""
+        if child_session_id not in self.child_sessions:
+            self.child_sessions[child_session_id] = parent_session_id
+            self._save()
+            logger.debug(f"Registered child session {child_session_id} -> parent {parent_session_id}")
+
+    def remove_child_session(self, child_session_id: str) -> None:
+        """Удаляет запись о дочерней сессии"""
+        if child_session_id in self.child_sessions:
+            del self.child_sessions[child_session_id]
+            logger.debug(f"Removed child session {child_session_id}")
