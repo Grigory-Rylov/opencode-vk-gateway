@@ -65,6 +65,7 @@ DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", None)
 LLAMA_SERVER_HOST = CONFIG.get("llama_server_host", "http://localhost:8081")
 MCP_SERVERS = CONFIG.get("mcp_servers", {})
+SUBAGENT_PREFIX = CONFIG.get("subagent_prefix", "[subagent] ")
 
 if not VK_TOKEN:
     raise ValueError("VK_TOKEN is required in config file")
@@ -125,6 +126,7 @@ def switch_config(config_name: str) -> bool:
     current_module.LLAMA_SERVER_PATH = new_config.get("llama_server_path", None)
     current_module.LLAMA_SERVER_HOST = new_config.get("llama_server_host", "http://localhost:8081")
     current_module.MCP_SERVERS = new_config.get("mcp_servers", {})
+    current_module.SUBAGENT_PREFIX = new_config.get("subagent_prefix", "[subagent] ")
     current_module.OPENCODE_BIN = Path(new_config["opencode_bin_path"])
     current_module.OPENCODE_CONFIG_PATH = Path(new_config.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()
     

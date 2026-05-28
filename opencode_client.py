@@ -126,3 +126,21 @@ class OpenCodeClient:
                 return True
             logger.error(f"Failed to reply to question: {resp.status}")
             return False
+
+    # ---------- Список сессий ----------
+
+    async def get_all_sessions(self) -> List[dict]:
+        """Получает список всех сессий."""
+        try:
+            async with self.session.get(f"{self.base_url}/session") as resp:
+                if resp.status != 200:
+                    return []
+                return await resp.json()
+        except Exception as e:
+            logger.warning(f"Error fetching sessions list: {e}")
+            return []
+
+    async def get_child_sessions(self, parent_id: str) -> List[dict]:
+        """Получает список дочерних сессий (subagent/subtask)."""
+        all_sessions = await self.get_all_sessions()
+        return [s for s in all_sessions if s.get("parentID") == parent_id]

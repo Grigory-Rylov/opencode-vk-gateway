@@ -21,6 +21,7 @@ from config import (
     LONGPOLL_WAIT,
     SCRIPT_DIR,
     SESSION_FILE,
+    SUBAGENT_PREFIX,
     THINKING_PEER_ID,
     getCwd,
 )
@@ -84,8 +85,12 @@ class VKLongPoll:
         self.session_pollers: Dict[str, asyncio.Task] = {}  # session_id -> poller_task
         self.user_session: Dict[int, str] = {}  # user_id -> session_id
 
+        # Child session (subagent/subtask) tracking
+        self.child_pollers: Dict[str, asyncio.Task] = {}  # child_session_id -> poller_task
+        self.parent_child_map: Dict[str, Dict[str, dict]] = {}  # parent_id -> {child_id: {title, no_new, notified_start}}
+
         # Временные хранилища
-        self.waiting_for_answer: Dict[int, str] = {}
+        self.    waiting_for_answer: Dict = {}  # user_id -> question_id или (peer_id, child_id) -> question_id
         self.pending_permissions: Dict[str, Tuple[str, int, int]] = {}
         self.seen_permissions: Dict[str, set] = {}
         self.seen_questions: Dict[str, set] = {}
@@ -98,14 +103,22 @@ class VKLongPoll:
             return
 
         logger.debug(f"Starting poller for session {session_id} (user {user_id})")
+        target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
         poller_task = asyncio.create_task(
             self._poll_session_messages(user_id, session_id)
         )
         self.session_pollers[session_id] = poller_task
         self.user_session[user_id] = session_id
 
+        # Сразу проверяем существующие child сессии при старте поллера
+        asyncio.create_task(
+            self._init_child_sessions(session_id, user_id, target_peer)
+        )
+
     async def _stop_session_poller(self, session_id: str):
-        """Останавливает поллер для сессии"""
+        """Останавливает поллер для сессии и все дочерние поллеры"""
+        await self._stop_all_child_pollers(session_id)
+
         if session_id in self.session_pollers:
             logger.debug(f"Stopping poller for session {session_id}")
             self.session_pollers[session_id].cancel()
@@ -122,6 +135,133 @@ class VKLongPoll:
             await self._stop_session_poller(session_id)
             del self.user_session[user_id]
 
+    # ---------- Управление child поллерами ----------
+    async def _init_child_sessions(self, parent_id: str, user_id: int, target_peer: int):
+        """При старте поллера проверяет активные child сессии из сохранённых и API"""
+        # Сначала ищем живые child сессии через API
+        new_children = await self._discover_new_child_sessions(parent_id, user_id, target_peer)
+        if new_children:
+            for child in new_children:
+                child_id = child["id"]
+                await self._start_child_poller(
+                    child_id, parent_id, user_id, target_peer, child
+                )
+
+    async def _start_child_poller(
+        self, child_id: str, parent_id: str, user_id: int, target_peer: int, child_info: dict
+    ):
+        """Запускает поллер для дочерней сессии"""
+        if child_id in self.child_pollers or child_id in self.session_pollers:
+            logger.warning(f"Poller for child session {child_id} already exists")
+            return
+
+        title = child_info.get("title", child_id[:12])
+        self._ensure_session_seen_messages(child_id)
+
+        if parent_id not in self.parent_child_map:
+            self.parent_child_map[parent_id] = {}
+        self.parent_child_map[parent_id][child_id] = {
+            "title": title,
+            "no_new": 0,
+            "notified_start": False,
+        }
+
+        logger.debug(f"Starting child poller for {child_id} (title: {title})")
+        poller_task = asyncio.create_task(
+            self._poll_child_messages(child_id, parent_id, user_id, target_peer)
+        )
+        self.child_pollers[child_id] = poller_task
+        self.session_pollers[child_id] = poller_task
+
+        target = THINKING_PEER_ID if THINKING_PEER_ID else user_id
+        await self.vk.send_message(
+            target,
+            f"🚀 Subagent started: {title}"
+        )
+
+    async def _stop_child_poller(self, child_id: str, parent_id: str):
+        """Останавливает поллер для дочерней сессии"""
+        if child_id in self.child_pollers:
+            logger.debug(f"Stopping child poller for {child_id}")
+            self.child_pollers[child_id].cancel()
+            try:
+                await self.child_pollers[child_id]
+            except asyncio.CancelledError:
+                pass
+            del self.child_pollers[child_id]
+
+        if child_id in self.session_pollers:
+            del self.session_pollers[child_id]
+
+        if parent_id in self.parent_child_map:
+            self.parent_child_map[parent_id].pop(child_id, None)
+            if not self.parent_child_map[parent_id]:
+                del self.parent_child_map[parent_id]
+
+        self.session_mgr.remove_child_session(child_id)
+
+    async def _stop_all_child_pollers(self, parent_id: str):
+        """Останавливает все дочерние поллеры для родительской сессии"""
+        if parent_id in self.parent_child_map:
+            for child_id in list(self.parent_child_map[parent_id].keys()):
+                await self._stop_child_poller(child_id, parent_id)
+
+    async def _poll_child_messages(
+        self, child_id: str, parent_id: str, user_id: int, target_peer: int
+    ):
+        """Поллер для дочерней сессии"""
+        try:
+            while True:
+                try:
+                    messages = await self.opencode_client.get_session_messages(child_id)
+                    if not messages:
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue
+
+                    last_info = self._get_child_info(parent_id, child_id)
+
+                    new_parts = self._get_new_message_parts(child_id, messages)
+
+                    if not new_parts:
+                        if last_info:
+                            last_info["no_new"] += 1
+                        if len(messages) > 0 and last_info and last_info["no_new"] >= 5:
+                            logger.info(f"Child session {child_id} appears finished")
+                            prefix = SUBAGENT_PREFIX
+                            title = last_info.get("title", child_id[:12])
+                            await self.vk.send_message(
+                                target_peer,
+                                f"🏁 Subagent finished: {title}"
+                            )
+                            await self._stop_child_poller(child_id, parent_id)
+                            return
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue
+
+                    if last_info:
+                        last_info["no_new"] = 0
+
+                    await self._send_new_parts_prefixed(
+                        new_parts, user_id, target_peer, prefix=SUBAGENT_PREFIX
+                    )
+
+                    await self._check_child_permissions(child_id, parent_id, user_id, target_peer)
+                    await asyncio.sleep(POLL_INTERVAL)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Child poller error for {child_id}: {e}")
+                    await asyncio.sleep(POLL_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info(f"Child poller stopped for {child_id}")
+            raise
+
+    def _get_child_info(self, parent_id: str, child_id: str) -> Optional[dict]:
+        """Получает информацию о дочерней сессии"""
+        if parent_id not in self.parent_child_map:
+            return None
+        return self.parent_child_map[parent_id].get(child_id)
+
     # ---------- Основной поллер сессии ----------
     async def _poll_session_messages(self, user_id: int, session_id: str):
         """Поллер для конкретной сессии - работает непрерывно"""
@@ -129,11 +269,29 @@ class VKLongPoll:
 
         target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
         self._ensure_session_seen_messages(session_id)
+        discovery_counter = 0
 
         try:
             while True:
                 try:
                     await self._process_session_updates(
+                        session_id, user_id, target_peer
+                    )
+
+                    # Периодическое обнаружение дочерних сессий
+                    discovery_counter += 1
+                    if discovery_counter % 15 == 0:
+                        new_children = await self._discover_new_child_sessions(
+                            session_id, user_id, target_peer
+                        )
+                        if new_children:
+                            for child in new_children:
+                                child_id = child["id"]
+                                await self._start_child_poller(
+                                    child_id, session_id, user_id, target_peer, child
+                                )
+
+                    await self._process_child_sessions(
                         session_id, user_id, target_peer
                     )
                     await asyncio.sleep(POLL_INTERVAL)
@@ -187,22 +345,71 @@ class VKLongPoll:
         for part in parts:
             await self._send_part_by_type(part, user_id, target_peer)
 
-    async def _send_part_by_type(self, part, user_id: int, target_peer: int):
+    async def _send_part_by_type(
+        self, part, user_id: int, target_peer: int, prefix: str = ""
+    ):
         """Отправляет часть сообщения в зависимости от ее типа"""
         text = part.text or ""
-        # Если текст только из пробелов/переносов - не отправляем, но уже сохранено в просмотренные
         if not text.strip():
-            logger.debug(
-                f"Skipping whitespace-only part: type={part.type}, id={part.id}"
-            )
             return
 
         if part.type == "tool":
-            await self.vk.send_message(target_peer, f"🧠: Tool\n{text}")
+            await self.vk.send_message(target_peer, f"{prefix}🧠: Tool\n{text}")
         elif part.type == "reasoning":
-            await self.vk.send_message(target_peer, f"🧠:\n{text}")
-        else:  # text
-            await self.vk.send_message(user_id, text)
+            await self.vk.send_message(target_peer, f"{prefix}🧠:\n{text}")
+        else:
+            await self.vk.send_message(user_id, f"{prefix}{text}")
+
+    async def _send_new_parts_prefixed(
+        self, parts: List, user_id: int, target_peer: int, prefix: str = ""
+    ):
+        """Отправляет новые части сообщений с префиксом"""
+        for part in parts:
+            await self._send_part_by_type(part, user_id, target_peer, prefix)
+
+    async def _discover_new_child_sessions(
+        self, parent_id: str, user_id: int, target_peer: int
+    ) -> List[dict]:
+        """Находит новые дочерние сессии для родительской сессии"""
+        try:
+            children = await self.opencode_client.get_child_sessions(parent_id)
+        except Exception as e:
+            logger.warning(f"Failed to discover child sessions: {e}")
+            return []
+
+        if parent_id not in self.parent_child_map:
+            self.parent_child_map[parent_id] = {}
+
+        new_children = []
+        for child in children:
+            child_id = child["id"]
+            if child_id in self.parent_child_map[parent_id]:
+                continue
+            if self.session_mgr.is_child_of(child_id, parent_id):
+                continue
+
+            self.session_mgr.register_child_session(child_id, parent_id)
+            new_children.append(child)
+
+        return new_children
+
+    async def _process_child_sessions(
+        self, parent_id: str, user_id: int, target_peer: int
+    ):
+        """Проверяет дочерние сессии на завершение через список всех сессий"""
+        if parent_id not in self.parent_child_map:
+            return
+
+        try:
+            children = await self.opencode_client.get_child_sessions(parent_id)
+        except Exception as e:
+            logger.warning(f"Failed to check child sessions: {e}")
+            return
+
+        active_ids = {c["id"] for c in children}
+        for child_id in list(self.parent_child_map[parent_id].keys()):
+            if child_id not in active_ids and child_id not in self.child_pollers:
+                await self._stop_child_poller(child_id, parent_id)
 
     # ---------- Обработка разрешений ----------
     async def _check_permissions(self, session_id: str, user_id: int):
@@ -216,6 +423,12 @@ class VKLongPoll:
 
         for perm in permissions:
             await self._process_permission(perm, session_id, user_id)
+
+        # Проверяем разрешения для дочерних сессий
+        child_ids = self.session_mgr.get_child_sessions(session_id)
+        for child_id in child_ids:
+            for perm in permissions:
+                await self._process_child_permission(perm, child_id, session_id, user_id)
 
     async def _process_permission(self, perm: dict, session_id: str, user_id: int):
         """Обрабатывает один запрос разрешения"""
@@ -344,6 +557,90 @@ class VKLongPoll:
         """Создает клавиатуру для ответа на разрешение"""
         return vk_keyboards.get_permission_keyboard()
 
+    async def _process_child_permission(
+        self, perm: dict, child_id: str, parent_id: str, user_id: int
+    ):
+        """Обрабатывает запрос разрешения дочерней сессии"""
+        perm_id = perm.get("id")
+        perm_session_id = perm.get("sessionID") or perm.get("session_id")
+
+        if perm_session_id != child_id:
+            return
+
+        if child_id not in self.seen_permissions:
+            self.seen_permissions[child_id] = set()
+        if perm_id in self.seen_permissions[child_id]:
+            return
+
+        self.seen_permissions[child_id].add(perm_id)
+
+        if self.session_mgr.get_grant_mode(parent_id) and self.opencode_client:
+            logger.debug(f"Auto-grant (parent): approving child permission {perm_id}")
+            await self.opencode_client.send_permission_response(
+                perm_session_id, perm_id, "always"
+            )
+            return
+
+        child_title = child_id[:12]
+        for ch_id, ch_info in self.parent_child_map.get(parent_id, {}).items():
+            if ch_id == child_id:
+                child_title = ch_info.get("title", child_id[:12])
+                break
+
+        perm_type = perm.get("permission") or perm.get("action") or "unknown"
+        perm_path = perm.get("path") or perm.get("metadata", {}).get("filepath", "")
+        msg = (
+            f"{SUBAGENT_PREFIX}⚠️ **Запрос разрешения (subagent)**\n\n"
+            f"Subagent: {child_title}\n"
+            f"Тип: `{perm_type}`\n"
+            f"Путь: `{perm_path}`"
+        )
+        keyboard = self._create_permission_keyboard()
+        target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
+        msg_id = await self.vk.send_message(target_peer, msg, keyboard=keyboard)
+        self.pending_permissions[perm_id] = (child_id, target_peer, msg_id)
+        logger.info(f"Sent child permission request {perm_id} for subagent {child_title}")
+
+    async def _check_child_permissions(
+        self, child_id: str, parent_id: str, user_id: int, target_peer: int
+    ):
+        """Проверяет разрешения для дочерней сессии (вызывается из child poller)"""
+        permissions = await self.opencode_client.get_pending_permissions()
+        if not permissions:
+            return
+
+        if child_id not in self.seen_permissions:
+            self.seen_permissions[child_id] = set()
+
+        for perm in permissions:
+            perm_id = perm.get("id")
+            perm_session_id = perm.get("sessionID") or perm.get("session_id")
+            if perm_session_id != child_id or perm_id in self.seen_permissions[child_id]:
+                continue
+
+            self.seen_permissions[child_id].add(perm_id)
+
+            if self.session_mgr.get_grant_mode(parent_id) and self.opencode_client:
+                await self.opencode_client.send_permission_response(
+                    perm_session_id, perm_id, "always"
+                )
+                continue
+
+            child_title = child_id[:12]
+            for ch_id, ch_info in self.parent_child_map.get(parent_id, {}).items():
+                if ch_id == child_id:
+                    child_title = ch_info.get("title", child_id[:12])
+                    break
+
+            perm_type = perm.get("permission") or perm.get("action") or "unknown"
+            msg = (
+                f"{SUBAGENT_PREFIX}⚠️ **Запрос разрешения (subagent: {child_title})**\n\n"
+                f"Тип: `{perm_type}`"
+            )
+            keyboard = self._create_permission_keyboard()
+            msg_id = await self.vk.send_message(target_peer, msg, keyboard=keyboard)
+            self.pending_permissions[perm_id] = (child_id, target_peer, msg_id)
+
     # ---------- Обработка вопросов ----------
     async def _check_questions(self, session_id: str, user_id: int):
         """Проверяет новые вопросы от OpenCode"""
@@ -356,6 +653,12 @@ class VKLongPoll:
 
         for q in questions:
             await self._process_question(q, session_id, user_id)
+
+        # Проверяем вопросы для дочерних сессий
+        child_ids = self.session_mgr.get_child_sessions(session_id)
+        for child_id in child_ids:
+            for q in questions:
+                await self._process_child_question(q, child_id, session_id, user_id)
 
     async def _process_question(self, q: dict, session_id: str, user_id: int):
         """Обрабатывает один вопрос"""
@@ -442,6 +745,62 @@ class VKLongPoll:
             f"❌ Ошибка отображения вопроса. Пожалуйста, ответьте текстом.\n\n"
             f"{header}\n{question_text}\nВарианты: {options_text}",
         )
+
+    async def _process_child_question(
+        self, q: dict, child_id: str, parent_id: str, user_id: int
+    ):
+        """Обрабатывает вопрос дочерней сессии"""
+        q_id = q.get("id")
+        q_session_id = q.get("sessionID") or q.get("session_id")
+
+        if q_session_id != child_id:
+            return
+
+        if child_id not in self.seen_questions:
+            self.seen_questions[child_id] = set()
+        if q_id in self.seen_questions[child_id]:
+            return
+
+        self.seen_questions[child_id].add(q_id)
+
+        child_title = child_id[:12]
+        for ch_id, ch_info in self.parent_child_map.get(parent_id, {}).items():
+            if ch_id == child_id:
+                child_title = ch_info.get("title", child_id[:12])
+                break
+
+        actual_question = q.get("questions", [{}])[0] if q.get("questions") else q
+        target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
+
+        header = actual_question.get("header") or actual_question.get("title") or "Вопрос"
+        question_text = (
+            actual_question.get("question")
+            or actual_question.get("text")
+            or actual_question.get("description")
+            or ""
+        )
+
+        msg = f"{SUBAGENT_PREFIX}🔧 **Вопрос (subagent: {child_title})**\n\n{header}\n\n{question_text}"
+        options = actual_question.get("options", [])
+        if options and isinstance(options[0], str):
+            options = [{"label": opt} for opt in options]
+
+        if options:
+            try:
+                keyboard = vk_keyboards.get_question_keyboard(options)
+                await self.vk.send_message(target_peer, msg, keyboard=keyboard)
+            except Exception:
+                options_text = ", ".join([opt["label"] for opt in options])
+                await self.vk.send_message(
+                    target_peer,
+                    f"{msg}\nВарианты: {options_text} (ответьте текстом)",
+                )
+        else:
+            await self.vk.send_message(target_peer, f"{msg}\n\nОтветьте текстом")
+
+        # Ключ (target_peer, child_id) чтобы не было конфликта с родительскими вопросами
+        self.waiting_for_answer[(target_peer, child_id)] = q_id
+        logger.info(f"Sent child question {q_id} for subagent {child_title}")
 
     async def _handle_question_answer(
         self, user_id: int, question_id: str, answer: str
@@ -586,11 +945,19 @@ class VKLongPoll:
             await self._handle_grant_command(user_id, cmd)
             return
 
-        # Обработка ответов на вопросы
+        # Обработка ответов на вопросы (родительские и дочерние)
+        # Сначала проверяем parent (int ключ)
         if user_id in self.waiting_for_answer:
             question_id = self.waiting_for_answer.pop(user_id)
             await self._handle_question_answer(user_id, question_id, text)
             return
+
+        # Проверяем child вопросы (кортеж ключ (peer_id, child_id))
+        for key in list(self.waiting_for_answer.keys()):
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == user_id:
+                question_id = self.waiting_for_answer.pop(key)
+                await self._handle_question_answer(user_id, question_id, text)
+                return
 
         # Обработка ответов на разрешения
         for permission_id, perm_data in list(self.pending_permissions.items()):
@@ -839,6 +1206,12 @@ class VKLongPoll:
         # seen_permissions и seen_questions хранятся по session_id, не по user_id
         # Их не трогаем — они относятся к конкретным сессиям, а не к пользователям
         # При удалении сессии через _stop_user_poller поллер остановится корректно
+
+        # Очищаем parent_child_map для старой сессии пользователя
+        if old_session_id and old_session_id in self.parent_child_map:
+            for child_id in list(self.parent_child_map[old_session_id].keys()):
+                self.session_mgr.remove_child_session(child_id)
+            del self.parent_child_map[old_session_id]
 
         # Если указана рабочая директория — перезапускаем opencode serve
         # (если это не дефолтная директория, всё равно перезапускаем для чистоты)
