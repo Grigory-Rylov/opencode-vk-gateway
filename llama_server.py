@@ -48,32 +48,20 @@ async def restart_llama_server(
         logger.error("No model args provided")
         return False
 
-    # Убиваем любой процесс на порту 8081, а не только с совпадающим путём
-    for kill_cmd in [
-        ["fuser", "-k", "8081/tcp"],
-        ["sh", "-c", "lsof -ti:8081 | xargs kill -9 2>/dev/null"],
-        ["pkill", "-9", "-f", "llama-server"],
-    ]:
-        try:
-            subprocess.run(kill_cmd, capture_output=True, timeout=5)
-        except:
-            pass
-    await asyncio.sleep(1)
-
-    # Ждём пока порт освободится (проверка через Python socket)
-    import socket
-    for _ in range(10):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        try:
-            sock.connect(("127.0.0.1", 8081))
-            sock.close()
-        except:
-            sock.close()
-            break
-        await asyncio.sleep(0.5)
-    else:
-        logger.warning("Port 8081 did not become free after 5s, continuing anyway")
+    # Убиваем предыдущий процесс llama-server по его пути из конфига
+    try:
+        prev_config = load_config()
+        prev_alias = prev_config.get("default_model")
+        if prev_alias:
+            prev_model = MODELS.get(prev_alias)
+            if prev_model:
+                prev_path = prev_model.get("llama_server_path") or llama_path
+                if prev_path:
+                    subprocess.run(["pkill", "-9", "-f", prev_path], capture_output=True)
+                    logger.info(f"Killed previous llama-server ({prev_alias}): {prev_path}")
+                    await asyncio.sleep(1)
+    except Exception as e:
+        logger.warning(f"Failed to kill previous llama-server: {e}")
 
     path = server_path
     args = model.get("args", "")
