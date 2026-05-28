@@ -578,6 +578,10 @@ class VKLongPoll:
             await self._handle_test_llama_command(user_id, cmd)
             return
 
+        if cmd.startswith("/config"):
+            await self._handle_config_command(user_id, cmd)
+            return
+
         if cmd.startswith("/grant"):
             await self._handle_grant_command(user_id, cmd)
             return
@@ -977,6 +981,69 @@ class VKLongPoll:
             keyboard=vk_keyboards.get_main_keyboard(),
         )
 
+    async def _handle_config_command(self, user_id: int, cmd: str):
+        """Обрабатывает команду /config <name> - переключение конфига бота."""
+        parts = cmd.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            await self.vk.send_message(
+                user_id,
+                "❌ Укажите имя конфига.\n\n"
+                "Пример: `/config server2` загрузит `config.server2.json`\n"
+                "Или полный путь: `/config /home/user/config.custom.json`",
+                keyboard=vk_keyboards.get_main_keyboard(),
+            )
+            return
+
+        config_name = parts[1].strip()
+        
+        # Проверяем, что файл существует
+        config_path = SCRIPT_DIR / f"config.{config_name}.json"
+        if not config_path.exists():
+            config_path = Path(config_name)
+            if not config_path.exists() or config_path.suffix != ".json":
+                await self.vk.send_message(
+                    user_id, f"❌ Конфиг не найден: {config_name}",
+                    keyboard=vk_keyboards.get_main_keyboard(),
+                )
+                return
+
+        await self.vk.send_message(user_id, f"🔄 Загружаю конфиг: {config_path.name}...")
+
+        # Переключаем конфиг
+        import config
+        if not config.switch_config(str(config_path)):
+            await self.vk.send_message(
+                user_id, "❌ Ошибка загрузки конфига",
+                keyboard=vk_keyboards.get_main_keyboard(),
+            )
+            return
+
+        # switch_config уже обновил все глобалы config-модуля.
+        # Пересоздаём клиента OpenCode с новым URL из конфига
+        self.opencode_client = OpenCodeClient()
+
+        # Обновляем конфиг opencode с новыми моделями
+        from llama_server import update_opencode_config
+        from models import get_current_model
+
+        current_model = get_current_model()
+        if current_model:
+            update_opencode_config(current_model, config.DEFAULT_MODEL)
+
+        # Рестартуем opencode serve
+        try:
+            await self.opencode_process.restart()
+        except Exception as e:
+            logger.warning(f"Failed to restart opencode after config switch: {e}")
+
+        await self.vk.send_message(
+            user_id,
+            f"✅ Конфиг `{config_path.name}` загружен\n"
+            f"📋 Модель: `{config.MODEL}`\n"
+            f"🔗 Сервер: {config.LLAMA_SERVER_HOST}",
+            keyboard=vk_keyboards.get_main_keyboard(),
+        )
+
     async def _handle_test_llama_command(self, user_id: int, cmd: str):
         """Обрабатывает команду /test-llama - тест скорости инференса llama-server"""
         # Определяем URL для теста
@@ -1016,8 +1083,9 @@ class VKLongPoll:
 /models - Показать доступные модели
 /m - То же что /models
 /clean_attaches - Очистить папку с аттачами
- /grant [true|false] - Авто-разрешение всех запросов (once)
- /help - Показать эту справку
+/grant [true|false] - Авто-разрешение всех запросов (once)
+/config &lt;name&gt; - Загрузить конфиг config.&lt;name&gt;.json
+/help - Показать эту справку
 /restart - Перезапустить с текущей моделью
 /restart <model> - Перезапустить с указанной моделью
 /r <model> - То же что /restart <model>

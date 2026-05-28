@@ -78,3 +78,58 @@ OPENCODE_CONFIG_PATH = Path(CONFIG.get("opencode_config_path", "~/.config/openco
 def getCwd() -> Path:
     """Возвращает текущую рабочую директорию процесса (не директорию скрипта)."""
     return Path.cwd()
+
+
+def switch_config(config_name: str) -> bool:
+    """Переключает конфиг бота на config.<name>.json.
+    
+    Загружает файл config.<config_name>.json из директории скрипта
+    и обновляет все глобальные константы модуля config.
+    
+    Args:
+        config_name: Имя конфига (config.<name>.json) или полный путь до файла .json
+        
+    Returns:
+        True если конфиг успешно загружен, иначе False.
+    """
+    import importlib
+    import sys
+    
+    # Определяем путь к конфигу
+    config_path = SCRIPT_DIR / f"config.{config_name}.json"
+    if not config_path.exists():
+        config_path = Path(config_name)
+        if not config_path.exists() or config_path.suffix != ".json":
+            return False
+    
+    config_str = str(config_path)
+    
+    try:
+        new_config = load_config(config_str)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    
+    # Обновляем глобальные переменные модуля
+    current_module = sys.modules[__name__]
+    current_module.CONFIG = new_config
+    current_module.VK_TOKEN = new_config["vk_token"]
+    current_module.OPENCODE_URL = new_config["opencode_url"]
+    current_module.SESSION_FILE = Path(new_config["session_file"])
+    current_module.VK_API_VERSION = new_config["vk_api_version"]
+    current_module.LONGPOLL_WAIT = new_config["longpoll_wait"]
+    current_module.PEER_ID = new_config.get("peer_id")
+    current_module.THINKING_PEER_ID = new_config.get("thinking_peer_id")
+    current_module.MODEL = new_config.get("model")
+    current_module.MODELS = new_config.get("models", {})
+    current_module.DEFAULT_MODEL = new_config.get("default_model")
+    current_module.LLAMA_SERVER_PATH = new_config.get("llama_server_path", None)
+    current_module.LLAMA_SERVER_HOST = new_config.get("llama_server_host", "http://localhost:8081")
+    current_module.MCP_SERVERS = new_config.get("mcp_servers", {})
+    current_module.OPENCODE_BIN = Path(new_config["opencode_bin_path"])
+    current_module.OPENCODE_CONFIG_PATH = Path(new_config.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()
+    
+    # Обновляем args.config чтобы importlib.reload(config) тоже подхватил
+    if hasattr(current_module.args, 'config'):
+        current_module.args.config = config_str
+    
+    return True
