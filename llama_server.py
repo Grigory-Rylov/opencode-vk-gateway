@@ -73,18 +73,11 @@ async def restart_llama_server(
         logger.error("No model args provided")
         return False
 
-    # Убиваем предыдущий процесс llama-server по его пути из конфига
+    # Убиваем предыдущий процесс llama-server по имени
     try:
-        prev_config = load_config()
-        prev_alias = prev_config.get("default_model")
-        if prev_alias:
-            prev_model = MODELS.get(prev_alias)
-            if prev_model:
-                prev_path = prev_model.get("llama_server_path") or llama_path
-                if prev_path:
-                    subprocess.run(["pkill", "-9", "-f", prev_path], capture_output=True)
-                    logger.info(f"Killed previous llama-server ({prev_alias}): {prev_path}")
-                    await asyncio.sleep(1)
+        subprocess.run(["pkill", "-9", "-f", "llama-server"], capture_output=True)
+        logger.info("Killed previous llama-server process")
+        await asyncio.sleep(1)
     except Exception as e:
         logger.warning(f"Failed to kill previous llama-server: {e}")
 
