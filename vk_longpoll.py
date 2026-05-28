@@ -360,7 +360,8 @@ class VKLongPoll:
         elif prefix:
             await self.vk.send_message(target_peer, f"{prefix}{text}")
         else:
-            await self.vk.send_message(user_id, f"{prefix}{text}")
+            dest = target_peer if prefix else user_id
+            await self.vk.send_message(dest, f"{prefix}{text}")
 
     async def _send_new_parts_prefixed(
         self, parts: List, user_id: int, target_peer: int, prefix: str = ""
