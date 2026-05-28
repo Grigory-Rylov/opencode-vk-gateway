@@ -34,10 +34,13 @@ async def restart_llama_server(
     model: dict, alias: str = None, llama_path: str = None
 ) -> bool:
     """Перезапускает llama server с указанной моделью."""
-    if llama_path is None:
+    # Путь к llama-server: сначала из модели, потом из глобального конфига
+    server_path = model.get("llama_server_path") or llama_path
+
+    if server_path is None:
         logger.error("llama_path is empty")
 
-    if not llama_path:
+    if not server_path:
         logger.info("llama-server not configured, skipping restart")
         return True
 
@@ -45,15 +48,27 @@ async def restart_llama_server(
         logger.error("No model args provided")
         return False
 
-    # Убиваем процесс llama-server на порту 8081
+    # Убиваем любой процесс на порту 8081, а не только с совпадающим путём
     try:
-        subprocess.run(["pkill", "-9", "-f", llama_path], capture_output=True)
-        logger.info("Killed existing llama-server processes")
+        subprocess.run(
+            ["fuser", "-k", "8081/tcp"],
+            capture_output=True,
+        )
+        logger.info("Killed process on port 8081")
         await asyncio.sleep(1)
     except Exception as e:
-        logger.warning(f"Failed to kill llama server: {e}")
+        logger.warning(f"Failed to kill process on port 8081: {e}")
 
-    path = llama_path
+    # Ждём пока порт освободится
+    for _ in range(10):
+        result = subprocess.run(
+            ["fuser", "8081/tcp"], capture_output=True
+        )
+        if result.returncode != 0:
+            break
+        await asyncio.sleep(0.5)
+
+    path = server_path
     args = model.get("args", "")
     cmd = f"{path} {args}"
 
@@ -61,13 +76,18 @@ async def restart_llama_server(
         env = os.environ.copy()
         env.pop("TMUX", None)
 
-        proc = subprocess.Popen(
-            shlex.split(cmd),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            start_new_session=True,
-        )
+        log_path = f"/tmp/llama-server-{alias or 'unknown'}.log"
+        logger.info(f"Starting llama server, logging to {log_path}")
+
+        with open(log_path, "a") as log_file:
+            proc = subprocess.Popen(
+                shlex.split(cmd),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+
         if proc:
             logger.info(
                 f"Started llama server with model {alias or 'unknown'}, pid={proc.pid}"
@@ -82,7 +102,8 @@ async def restart_llama_server(
 
 async def wait_for_llama_server(
     timeout: int = LLAMA_STARTUP_TIMEOUT,
-    interval: int = LLAMA_CHECK_INTERVAL
+    interval: int = LLAMA_CHECK_INTERVAL,
+    model_alias: str = None,
 ) -> bool:
     """Ждёт готовности llama сервера."""
     # Используем URL из конфига, добавляем / если нет
@@ -101,6 +122,11 @@ async def wait_for_llama_server(
         except (aiohttp.ClientError, asyncio.TimeoutError):
             pass
 
+    log_path = f"/tmp/llama-server-{model_alias or 'unknown'}.log"
+    logger.error(
+        f"llama-server did not start within {timeout}s. "
+        f"Check log for details: {log_path}"
+    )
     return False
 
 
@@ -289,8 +315,8 @@ async def do_restart(
         await vk_client.send_message(user_id, "⚠️ Не удалось запустить llama server")
         logger.warning("Failed to restart llama server")
 
-    # Шаг 2: Ждём llama ready
-    ready = await wait_for_llama_server()
+    # Шаг 2: Ждём пока модель загрузится (важно: ждём ДО обновления конфига opencode)
+    ready = await wait_for_llama_server(model_alias=alias)
 
     if ready:
         await vk_client.send_message(user_id, f"✅ Модель {alias} загружена и готова!")
