@@ -7,7 +7,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Set
 
 import aiohttp
 
@@ -28,6 +28,31 @@ from config import MODELS
 # Константы
 LLAMA_STARTUP_TIMEOUT = 300  # секунд
 LLAMA_CHECK_INTERVAL = 5  # секунд
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 МБ для лога
+
+# Множество для хранения фоновых задач, чтобы не GC-ились
+_log_reader_tasks: Set[asyncio.Task] = set()
+
+
+async def _log_reader(proc: subprocess.Popen, log_path: str, max_size: int = MAX_LOG_SIZE):
+    """Читает stdout процесса и пишет в лог, усекая до max_size."""
+    tmp = log_path + ".tmp"
+    loop = asyncio.get_running_loop()
+    with open(log_path, "ab") as f:
+        while True:
+            line = await loop.run_in_executor(None, proc.stdout.readline)
+            if not line:
+                break
+            f.write(line)
+            if os.fstat(f.fileno()).st_size > max_size:
+                f.close()
+                subprocess.run(
+                    ["tail", "-c", str(max_size), log_path],
+                    capture_output=True, stdout=open(tmp, "wb"), check=False,
+                )
+                os.replace(tmp, log_path)
+                f = open(log_path, "ab")
+    f.close()
 
 
 async def restart_llama_server(
@@ -74,19 +99,21 @@ async def restart_llama_server(
         log_path = f"/tmp/llama-server-{alias or 'unknown'}.log"
         logger.info(f"Starting llama server, logging to {log_path}")
 
-        with open(log_path, "a") as log_file:
-            proc = subprocess.Popen(
-                shlex.split(cmd),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-            )
+        proc = subprocess.Popen(
+            shlex.split(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
 
         if proc:
             logger.info(
                 f"Started llama server with model {alias or 'unknown'}, pid={proc.pid}"
             )
+            task = asyncio.ensure_future(_log_reader(proc, log_path))
+            _log_reader_tasks.add(task)
+            task.add_done_callback(_log_reader_tasks.discard)
             await asyncio.sleep(3)
             return True
         return False
