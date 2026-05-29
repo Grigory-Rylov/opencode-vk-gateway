@@ -357,6 +357,8 @@ class VKLongPoll:
             await self.vk.send_message(target_peer, f"{prefix}🧠: Tool\n{text}")
         elif part.type == "reasoning":
             await self.vk.send_message(target_peer, f"{prefix}🧠:\n{text}")
+        elif prefix:
+            await self.vk.send_message(target_peer, f"{prefix}{text}")
         else:
             await self.vk.send_message(user_id, f"{prefix}{text}")
 
