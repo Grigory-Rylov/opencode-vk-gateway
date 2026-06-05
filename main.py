@@ -25,10 +25,62 @@ from opencode_process import OpenCodeProcess
 from session_manager import SessionManager
 from vk_longpoll import VKLongPoll
 from vk_client import VKClient
-from llama_server import restart_llama_server
+from llama_server import restart_llama_server, update_opencode_config
 from models import get_current_model
 from config import DEFAULT_MODEL
 import vk_keyboards
+
+
+async def send_configs_as_attachments(vk: VKClient, peer_id: int, opencode_process: OpenCodeProcess):
+    """Генерирует конфиги и отправляет их как аттачи."""
+    from llama_server import LLAMA_SERVER_HOST
+    from config import OPENCODE_CONFIG_PATH, MODELS
+
+    config_json_path = SCRIPT_DIR / "config.json"
+
+    # Генерируем актуальный opencode конфиг
+    current_model = get_current_model()
+    update_opencode_config(current_model, DEFAULT_MODEL)
+
+    # Считываем оба конфига
+    try:
+        project_config_text = config_json_path.read_text(encoding="utf-8")
+        config_path = Path(OPENCODE_CONFIG_PATH).expanduser()
+        opencode_config_text = config_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to read configs for attachment: {e}")
+        return
+
+    # Сохраняем временные файлы
+    tmp_dir = SCRIPT_DIR / "tmp_startup_configs"
+    tmp_dir.mkdir(exist_ok=True)
+
+    project_config_path = tmp_dir / "config.json"
+    opencode_config_path = tmp_dir / "opencode_generated.json"
+
+    project_config_path.write_text(project_config_text, encoding="utf-8")
+    opencode_config_path.write_text(opencode_config_text, encoding="utf-8")
+
+    # Отправляем первым — проект конфиг
+    try:
+        await vk.send_file(peer_id, str(project_config_path), "config.json", "📄 Project config.json")
+    except Exception as e:
+        logger.warning(f"Failed to send project config: {e}")
+
+    # Отправляем вторым — сгенерированный opencode конфиг
+    try:
+        await vk.send_file(peer_id, str(opencode_config_path), "opencode_generated.json", "📄 Generated opencode config")
+    except Exception as e:
+        logger.warning(f"Failed to send opencode config: {e}")
+
+    # Убираем временные файлы через пару секунд
+    await asyncio.sleep(2)
+    try:
+        project_config_path.unlink(missing_ok=True)
+        opencode_config_path.unlink(missing_ok=True)
+        tmp_dir.rmdir(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to cleanup temp configs: {e}")
 
 
 async def main():
@@ -79,6 +131,11 @@ async def main():
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")
+
+        try:
+            await send_configs_as_attachments(vk, PEER_ID, opencode_process)
+        except Exception as e:
+            logger.warning(f"Failed to send configs: {e}")
 
         poller = VKLongPoll(vk, session_mgr, opencode_process)
         

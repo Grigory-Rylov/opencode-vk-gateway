@@ -165,9 +165,13 @@ def update_opencode_config(model: dict, alias: str) -> bool:
                 "name": model_alias,
             }
 
+        model_str = model.get("model", "")
+        if model_str and "/" not in model_str:
+            model_str = f"llama.cpp/{model_str}"
+
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
-            "model": model.get("model", ""),
+            "model": model_str,
             "provider": {
                 "llama.cpp": {
                     "npm": "@ai-sdk/openai-compatible",
