@@ -1082,7 +1082,6 @@ class VKLongPoll:
             model_alias,
             opencode_process=self.opencode_process,
             session_mgr=self.session_mgr,
-            current_model=bot_config.MODEL,
             current_default=bot_config.DEFAULT_MODEL,
         )
 
@@ -1400,11 +1399,8 @@ class VKLongPoll:
 
         # Обновляем конфиг opencode с новыми моделями
         from llama_server import update_opencode_config
-        from models import get_current_model
 
-        current_model = get_current_model()
-        if current_model:
-            update_opencode_config(current_model, config.DEFAULT_MODEL)
+        update_opencode_config(config.DEFAULT_MODEL)
 
         # Рестартуем opencode serve
         try:
@@ -1415,7 +1411,7 @@ class VKLongPoll:
         await self.vk.send_message(
             user_id,
             f"✅ Конфиг `{config_path.name}` загружен\n"
-            f"📋 Модель: `{config.MODEL}`\n"
+            f"📋 Модель: `{config.DEFAULT_MODEL}`\n"
             f"🔗 Сервер: {config.LLAMA_SERVER_HOST}",
             keyboard=vk_keyboards.get_main_keyboard(),
         )
@@ -1430,9 +1426,10 @@ class VKLongPoll:
         else:
             llama_url = LLAMA_SERVER_HOST.rstrip("/")
         
-        # Берём текущую модель для отправки в запросе
+        # Берём текущую модель для отправки в запросе (алиас модели)
         current_model = get_current_model()
-        model_name = current_model.get("model") if current_model else None
+        # Для llama-server используем алиас как имя модели
+        model_name = config.DEFAULT_MODEL if current_model else None
         
         await self.vk.send_message(user_id, "🔍 Тестирование llama-server...")
         

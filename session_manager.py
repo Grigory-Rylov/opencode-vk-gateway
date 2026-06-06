@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 from aiohttp import ClientSession
 
-from config import OPENCODE_URL, SESSION_FILE, MODEL
+from config import OPENCODE_URL, SESSION_FILE, DEFAULT_MODEL
 from logging_config import logger
 from models import model_to_api_format
 
@@ -66,7 +66,7 @@ class SessionManager:
             return self.sessions[user_id]
 
         async with ClientSession() as session:
-            data = model_to_api_format(MODEL)
+            data = model_to_api_format(DEFAULT_MODEL)
             async with session.post(f"{OPENCODE_URL}/session", json=data) as resp:
                 resp.raise_for_status()
                 resp_data = await resp.json()
@@ -78,7 +78,7 @@ class SessionManager:
                     self.grant_mode[session_id] = False
                 self._save()
                 logger.info(
-                    f"Created OpenCode session {session_id} for user {user_id} with model {MODEL}"
+                    f"Created OpenCode session {session_id} for user {user_id} with model {DEFAULT_MODEL}"
                 )
                 return session_id
 

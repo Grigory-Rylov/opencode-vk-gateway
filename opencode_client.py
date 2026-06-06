@@ -41,7 +41,7 @@ class OpenCodeClient:
 
     async def create_session(self, model: str = None) -> str:
         """Создаёт новую сессию и возвращает её ID."""
-        data = model_to_api_format(model or config.MODEL)
+        data = model_to_api_format(model or config.DEFAULT_MODEL)
         async with self.session.post(f"{self.base_url}/session", json=data) as resp:
             resp.raise_for_status()
             resp_data = await resp.json()

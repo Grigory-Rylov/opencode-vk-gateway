@@ -145,7 +145,7 @@ async def wait_for_llama_server(
     return False
 
 
-def update_opencode_config(model: dict, alias: str) -> bool:
+def update_opencode_config(alias: str) -> bool:
     """Обновляет конфиг OpenCode с провайдером и всеми доступными моделями."""
     try:
         opencode_config_path = OPENCODE_CONFIG_PATH
@@ -161,17 +161,23 @@ def update_opencode_config(model: dict, alias: str) -> bool:
         # Строим словарь моделей для opencode - ВСЕ модели, не только текущая
         opencode_models = {}
         for model_alias, model_info in all_models.items():
+            # Берём реальное имя модели из поля "model" (может отличаться от алиаса)
+            # Внутри provider.llama.cpp.models НЕ добавляем префикс провайдера
+            real_model_name = model_info.get("model", model_alias)
             opencode_models[model_alias] = {
-                "name": model_alias,
+                "name": real_model_name,
             }
 
-        model_str = model.get("model", "")
-        if model_str and "/" not in model_str:
-            model_str = f"llama.cpp/{model_str}"
+        # Для верхнего уровня "model" добавляем префикс провайдера
+        current_model_name_from_list = opencode_models.get(alias, {}).get("name", alias)
+        if current_model_name_from_list and "/" not in current_model_name_from_list:
+            current_model_name = f"llama.cpp/{current_model_name_from_list}"
+        else:
+            current_model_name = current_model_name_from_list
 
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
-            "model": model_str,
+            "model": current_model_name,
             "provider": {
                 "llama.cpp": {
                     "npm": "@ai-sdk/openai-compatible",
@@ -194,12 +200,11 @@ def update_opencode_config(model: dict, alias: str) -> bool:
         return False
 
 
-def save_model_config(model_name: str, alias: str) -> bool:
-    """Сохраняет модель в конфиг файл."""
+def save_model_config(alias: str) -> bool:
+    """Сохраняет алиас модели в конфиг файл (default_model)."""
     try:
         config = load_config()
         config["default_model"] = alias
-        config["model"] = model_name
         with open(SCRIPT_DIR / "config.json", "w") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
         return True
@@ -288,7 +293,6 @@ async def do_restart(
     model_alias: str = None,
     opencode_process=None,
     session_mgr=None,
-    current_model: str = None,
     current_default: str = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -301,7 +305,7 @@ async def do_restart(
     4) update_opencode_config (пишем новый конфиг)
     5) start opencode (запускаем с новым конфигом)
     6) save_model_config (сохраняем в config.json бота)
-    7) reload config (обновляем MODEL в памяти)
+    7) reload config (обновляем DEFAULT_MODEL в памяти)
     8) clean sessions
 
     Args:
@@ -310,7 +314,6 @@ async def do_restart(
         model_alias: Алиас модели (если None, используется текущая)
         opencode_process: Процесс OpenCode для перезапуска
         session_mgr: Менеджер сессий
-        current_model: Текущая модель (передаётся извне)
         current_default: Текущий дефолтный алиас (передаётся извне)
 
     Returns:
@@ -351,17 +354,16 @@ async def do_restart(
         await opencode_process.stop()
 
     # Шаг 4: Пишем новый конфиг opencode (после того как процесс убит — точно прочитает новый)
-    update_opencode_config(model, alias)
+    update_opencode_config(alias)
 
     # Шаг 5: Запускаем новый opencode (прочитает новый конфиг)
-    model_name = model.get("model", current_model)
     if opencode_process:
         await opencode_process.start()
 
-    # Шаг 6: Сохраняем в config.json бота
-    save_model_config(model_name, alias)
+    # Шаг 6: Сохраняем в config.json бота (только алиас)
+    save_model_config(alias)
 
-    # Шаг 7: Обновляем MODEL в памяти
+    # Шаг 7: Обновляем DEFAULT_MODEL в памяти
     import importlib
     import config
     importlib.reload(config)

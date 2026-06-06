@@ -39,8 +39,7 @@ async def send_configs_as_attachments(vk: VKClient, peer_id: int, opencode_proce
     config_json_path = SCRIPT_DIR / "config.json"
 
     # Генерируем актуальный opencode конфиг
-    current_model = get_current_model()
-    update_opencode_config(current_model, DEFAULT_MODEL)
+    update_opencode_config(DEFAULT_MODEL)
 
     # Считываем оба конфига
     try:
@@ -116,7 +115,7 @@ async def main():
         workdir = Path(session_mgr.session_workdir[first_session_id])
         logger.info(f"Restored workdir from session {first_session_id}: {workdir}")
 
-    opencode_process = OpenCodeProcess(model=bot_config.MODEL, workdir=workdir)
+    opencode_process = OpenCodeProcess(model=bot_config.DEFAULT_MODEL, workdir=workdir)
     logger.info(f"OpenCodeProcess created with workdir={opencode_process.workdir}")
     await opencode_process.start()
 
@@ -126,7 +125,7 @@ async def main():
         try:
             await vk.send_message(
                 PEER_ID,
-                f"🤖 OpenCode VK Gateway запущен\n\nModel: {bot_config.MODEL}\nWorkdir: {workdir}",
+                f"🤖 OpenCode VK Gateway запущен\n\nModel: {bot_config.DEFAULT_MODEL}\nWorkdir: {workdir}",
                 keyboard=vk_keyboards.get_main_keyboard(),
             )
         except Exception as e:

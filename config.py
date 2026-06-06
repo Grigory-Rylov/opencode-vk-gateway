@@ -13,7 +13,6 @@ DEFAULT_CONFIG = {
     "vk_api_version": "5.200",
     "longpoll_wait": 25,
     "thinking_peer_id": 2000000506,
-    "model": "llama.cpp/qwen3.5-122b",
     "llama_server_path": "llama-server",
     "llama_server_host": "http://localhost:8081",  # URL удалённого llama-server
     "opencode_config_path": "~/.config/opencode/opencode.json",
@@ -59,7 +58,6 @@ VK_API_VERSION = CONFIG["vk_api_version"]
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
 PEER_ID = CONFIG.get("peer_id")
 THINKING_PEER_ID = CONFIG.get("thinking_peer_id")
-MODEL = CONFIG.get("model")
 MODELS = CONFIG.get("models", {})
 DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", None)
@@ -120,7 +118,6 @@ def switch_config(config_name: str) -> bool:
     current_module.LONGPOLL_WAIT = new_config["longpoll_wait"]
     current_module.PEER_ID = new_config.get("peer_id")
     current_module.THINKING_PEER_ID = new_config.get("thinking_peer_id")
-    current_module.MODEL = new_config.get("model")
     current_module.MODELS = new_config.get("models", {})
     current_module.DEFAULT_MODEL = new_config.get("default_model")
     current_module.LLAMA_SERVER_PATH = new_config.get("llama_server_path", None)
