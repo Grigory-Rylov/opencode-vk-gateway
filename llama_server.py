@@ -168,12 +168,11 @@ def update_opencode_config(alias: str) -> bool:
                 "name": real_model_name,
             }
 
-        # Для верхнего уровня "model" добавляем префикс провайдера
-        current_model_name_from_list = opencode_models.get(alias, {}).get("name", alias)
-        if current_model_name_from_list and "/" not in current_model_name_from_list:
-            current_model_name = f"llama.cpp/{current_model_name_from_list}"
+        # Для верхнего уровня "model" используем алиас с префиксом провайдера
+        if alias and "/" not in alias:
+            current_model_name = f"llama.cpp/{alias}"
         else:
-            current_model_name = current_model_name_from_list
+            current_model_name = alias
 
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
