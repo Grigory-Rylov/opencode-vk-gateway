@@ -17,6 +17,10 @@ from aiohttp import ClientSession, ClientTimeout, FormData
 
 logger = logging.getLogger("vk-opencode")
 
+# Константы для retry при флуд-контроле
+MAX_RETRIES = 3
+INITIAL_RETRY_DELAY = 0.5  # секунды
+
 
 class VKClient:
     BASE_URL = "https://api.vk.com/method/"
@@ -99,7 +103,7 @@ class VKClient:
         attachment: str = "",
         keyboard: Optional[dict] = None,
     ) -> int:
-        """Отправка одного сообщения."""
+        """Отправка одного сообщения с retry при флуд-контроле."""
         payload = {
             "peer_id": peer_id,
             "random_id": int(time.time() * 1000),
@@ -114,14 +118,38 @@ class VKClient:
             payload["keyboard"] = json.dumps(keyboard)
 
         url = f"{self.BASE_URL}messages.send"
-        async with self.session.post(url, data=payload) as resp:
-            data = await resp.json()
-            if "error" in data:
-                raise Exception(f"VK API error: {data['error']}")
-            resp_data = data["response"]
-            return (
-                resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
-            )
+
+        # Retry с экспоненциальной задержкой при флуд-контроле
+        for attempt in range(MAX_RETRIES):
+            async with self.session.post(url, data=payload) as resp:
+                data = await resp.json()
+                if "error" in data:
+                    error = data["error"]
+                    error_code = error.get("error_code")
+                    error_msg = error.get("error_msg", "")
+
+                    # Проверяем на флуд-контроль (ошибка 9 или текст содержит "Flood control")
+                    is_flood = (
+                        error_code == 9 or
+                        "Flood control" in error_msg or
+                        "too much messages" in error_msg.lower()
+                    )
+
+                    if is_flood and attempt < MAX_RETRIES - 1:
+                        delay = INITIAL_RETRY_DELAY * (2 ** attempt)
+                        logger.warning(
+                            f"Flood control detected, retry {attempt + 1}/{MAX_RETRIES} "
+                            f"after {delay:.1f}s"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    raise Exception(f"VK API error: {error}")
+
+                resp_data = data["response"]
+                return (
+                    resp_data[0]["message_id"] if isinstance(resp_data, list) else resp_data
+                )
 
     def _split_text(self, text: str, max_length: int) -> List[str]:
         """Разбивает текст на части по строкам, не превышая max_length."""

@@ -61,6 +61,27 @@ def extract_command(text: str) -> str:
     return text
 
 
+def _create_task_with_handler(coroutine, task_name: str = None):
+    """
+    Создаёт задачу с обработчиком ошибок.
+    Возвращает саму задачу для возможного ожидания/отмены.
+    """
+    task = asyncio.create_task(coroutine)
+    if task_name:
+        task.set_name(task_name)
+
+    def done_callback(t):
+        try:
+            exception = t.exception()
+            if exception:
+                logger.exception(f"Task {task_name or t.get_name()} failed: {exception}")
+        except asyncio.CancelledError:
+            pass  # Отмена задачи - это нормально
+
+    task.add_done_callback(done_callback)
+    return task
+
+
 class VKLongPoll:
     """Лонгполл слушатель VK для обработки сообщений."""
 
@@ -104,15 +125,17 @@ class VKLongPoll:
 
         logger.debug(f"Starting poller for session {session_id} (user {user_id})")
         target_peer = THINKING_PEER_ID if THINKING_PEER_ID else user_id
-        poller_task = asyncio.create_task(
-            self._poll_session_messages(user_id, session_id)
+        poller_task = _create_task_with_handler(
+            self._poll_session_messages(user_id, session_id),
+            task_name=f"poll_session_{session_id[:8]}"
         )
         self.session_pollers[session_id] = poller_task
         self.user_session[user_id] = session_id
 
         # Сразу проверяем существующие child сессии при старте поллера
-        asyncio.create_task(
-            self._init_child_sessions(session_id, user_id, target_peer)
+        _create_task_with_handler(
+            self._init_child_sessions(session_id, user_id, target_peer),
+            task_name=f"init_child_sessions_{session_id[:8]}"
         )
 
     async def _stop_session_poller(self, session_id: str):
@@ -167,8 +190,9 @@ class VKLongPoll:
         }
 
         logger.debug(f"Starting child poller for {child_id} (title: {title})")
-        poller_task = asyncio.create_task(
-            self._poll_child_messages(child_id, parent_id, user_id, target_peer)
+        poller_task = _create_task_with_handler(
+            self._poll_child_messages(child_id, parent_id, user_id, target_peer),
+            task_name=f"poll_child_{child_id[:8]}"
         )
         self.child_pollers[child_id] = poller_task
         self.session_pollers[child_id] = poller_task
@@ -887,8 +911,6 @@ class VKLongPoll:
             return
         if cmd == "/update":
             return
-        if cmd == "/status":
-            return
 
         # Игнорируем команды gateway-restarter.py (не отправлять в OpenCode)
         if cmd in ("/b", "/branch"):
@@ -905,6 +927,10 @@ class VKLongPoll:
 
         if cmd.startswith("/restart") or cmd.startswith("/r"):
             await self._handle_restart_command(user_id, cmd)
+            return
+
+        if cmd == "/status":
+            await self._handle_status_command(user_id)
             return
 
         if cmd.startswith("/models") or cmd == "/m":
@@ -1106,6 +1132,15 @@ class VKLongPoll:
             await self._start_session_poller(user_id, new_session_id)
 
             await self.vk.send_message(user_id, f"✅ Модель {model_info} загружена")
+
+    async def _handle_status_command(self, user_id: int):
+        """Обрабатывает команду /status - показывает текущий статус бота"""
+        status_lines = [
+            "📊 **Статус бота**\n",
+            f"🤖 Модель: `{bot_config.DEFAULT_MODEL}`",
+            f"🔗 Llama-server: {LLAMA_SERVER_HOST}",
+        ]
+        await self.vk.send_message(user_id, "\n".join(status_lines))
 
     async def _handle_models_command(self, user_id: int):
         """Обрабатывает команду /models"""
@@ -1429,7 +1464,7 @@ class VKLongPoll:
         # Берём текущую модель для отправки в запросе (алиас модели)
         current_model = get_current_model()
         # Для llama-server используем алиас как имя модели
-        model_name = config.DEFAULT_MODEL if current_model else None
+        model_name = bot_config.DEFAULT_MODEL if current_model else None
         
         await self.vk.send_message(user_id, "🔍 Тестирование llama-server...")
         
@@ -1497,7 +1532,10 @@ class VKLongPoll:
 
                     for update in updates:
                         if isinstance(update, list) and update[0] == 4:
-                            asyncio.create_task(self._handle_message_new(update))
+                            _create_task_with_handler(
+                                self._handle_message_new(update),
+                                task_name="handle_message_new"
+                            )
 
                 except asyncio.CancelledError:
                     break
