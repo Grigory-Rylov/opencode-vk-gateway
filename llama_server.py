@@ -165,7 +165,7 @@ def update_opencode_config(alias: str) -> bool:
             # Внутри provider.llama.cpp.models НЕ добавляем префикс провайдера
             real_model_name = model_info.get("model", model_alias)
             opencode_models[model_alias] = {
-                "name": real_model_name,
+                "id": real_model_name,
             }
 
         # Для верхнего уровня "model" используем алиас с префиксом провайдера
@@ -374,4 +374,4 @@ async def do_restart(
             f"Cleared session for user {user_id} after model switch to {alias}"
         )
 
-    return model_name, None
+    return model.get("model", alias), None
