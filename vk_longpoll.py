@@ -1430,7 +1430,9 @@ class VKLongPoll:
 
         # switch_config уже обновил все глобалы config-модуля.
         # Пересоздаём клиента OpenCode с новым URL из конфига
+        await self.opencode_client.__aexit__(None, None, None)
         self.opencode_client = OpenCodeClient()
+        await self.opencode_client.__aenter__()
 
         # Обновляем конфиг opencode с новыми моделями
         from llama_server import update_opencode_config
@@ -1443,11 +1445,41 @@ class VKLongPoll:
         except Exception as e:
             logger.warning(f"Failed to restart opencode after config switch: {e}")
 
+        # После смены конфига пересоздаём ВСЕ сессии с новой моделью,
+        # сохраняя их рабочие директории
+        old_sessions = dict(self.session_mgr.sessions)  # копируем, чтобы не менять во время итерации
+        my_new_sid = None
+        for uid, old_sid in old_sessions.items():
+            saved_wd = self.session_mgr.get_session_workdir(old_sid)
+            if not saved_wd:
+                saved_wd = getattr(self.opencode_process, "workdir", None)
+
+            await self._stop_user_poller(uid)
+            self.session_mgr.remove_session(uid)
+
+            new_sid = await self.opencode_client.create_session()
+            self.session_mgr.sessions[uid] = new_sid
+            if new_sid not in self.session_mgr.seen_messages:
+                self.session_mgr.seen_messages[new_sid] = set()
+            if new_sid not in self.session_mgr.grant_mode:
+                self.session_mgr.grant_mode[new_sid] = False
+            if saved_wd:
+                self.session_mgr.set_session_workdir(new_sid, saved_wd)
+
+            if uid == user_id:
+                my_new_sid = new_sid
+
+        self.session_mgr._save()
+
+        if my_new_sid:
+            await self._start_session_poller(user_id, my_new_sid)
+
         await self.vk.send_message(
             user_id,
             f"✅ Конфиг `{config_path.name}` загружен\n"
             f"📋 Модель: `{config.DEFAULT_MODEL}`\n"
-            f"🔗 Сервер: {config.LLAMA_SERVER_HOST}",
+            f"🔗 Сервер: {config.LLAMA_SERVER_HOST}\n"
+            f"🔄 Сессия обновлена: {my_new_sid or '?'}",
             keyboard=vk_keyboards.get_main_keyboard(),
         )
 
@@ -1461,10 +1493,9 @@ class VKLongPoll:
         else:
             llama_url = LLAMA_SERVER_HOST.rstrip("/")
         
-        # Берём текущую модель для отправки в запросе (алиас модели)
+        # Берём текущую модель для отправки в запросе (реальное имя модели)
         current_model = get_current_model()
-        # Для llama-server используем алиас как имя модели
-        model_name = bot_config.DEFAULT_MODEL if current_model else None
+        model_name = current_model.get("model") if current_model else None
         
         await self.vk.send_message(user_id, "🔍 Тестирование llama-server...")
         

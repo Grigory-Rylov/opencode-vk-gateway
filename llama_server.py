@@ -148,15 +148,19 @@ async def wait_for_llama_server(
 def update_opencode_config(alias: str) -> bool:
     """Обновляет конфиг OpenCode с провайдером и всеми доступными моделями."""
     try:
-        opencode_config_path = OPENCODE_CONFIG_PATH
+        import config as bot_config
+
+        opencode_config_path = bot_config.OPENCODE_CONFIG_PATH
+        llama_host = bot_config.LLAMA_SERVER_HOST
+        mcp_servers = bot_config.MCP_SERVERS
 
         # Загружаем все модели из проекта, чтобы opencode знал о них всех
-        project_config = load_config()
+        project_config = bot_config.load_config(getattr(bot_config.args, 'config', "config.json"))
         all_models = project_config.get("models", {})
         # Если models не найден в файле (или это список вместо словаря),
         # используем глобальный MODELS из config.py как фоллбэк
         if not isinstance(all_models, dict) or not all_models:
-            all_models = MODELS
+            all_models = bot_config.MODELS
 
         # Строим словарь моделей для opencode - ВСЕ модели, не только текущая
         opencode_models = {}
@@ -181,14 +185,20 @@ def update_opencode_config(alias: str) -> bool:
                 "llama.cpp": {
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "llama-server (local)",
-                    "options": {"baseURL": f"{LLAMA_SERVER_HOST}/v1"},
+                    "options": {"baseURL": f"{llama_host}/v1"},
                     "models": opencode_models,
                 }
             },
         }
-        if MCP_SERVERS:
-            opencode_config["mcp"] = MCP_SERVERS
-            logger.info(f"Added {len(MCP_SERVERS)} MCP server(s) to opencode config")
+        # Добавляем permission из конфига бота (если есть)
+        permission = project_config.get("permission")
+        if permission:
+            opencode_config["permission"] = permission
+            logger.info("Added permission rules to opencode config")
+
+        if mcp_servers:
+            opencode_config["mcp"] = mcp_servers
+            logger.info(f"Added {len(mcp_servers)} MCP server(s) to opencode config")
         logger.info(f"Writing {len(opencode_models)} models to opencode config")
         with open(opencode_config_path, "w") as f:
             json.dump(opencode_config, f, indent=2)
