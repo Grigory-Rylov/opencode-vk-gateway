@@ -1,6 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "permission": {
-    "external_directory": { "/tmp/**": "allow", "/home/orangepi/data/projects/android/android/**": "allow", "*": "ask" }
+    "external_directory": { "/tmp/**": "allow", "/home/orangepi/projects/go/opencode_build/**": "allow", "/home/orangepi/data/projects/android/android/**": "allow", "*": "ask" }
+  },
+  "mcp": {
+    "ya-disk-uploader": {
+      "type": "local",
+      "command": ["/home/orangepi/projects/go/ya-disk-uploader/ya-disk-uploader", "mcp"],
+      "enabled": true
+    },
+    "vk-files": {
+      "type": "local",
+      "command": ["/home/orangepi/projects/go/mcp-vk-files/mcp-vk-files", "mcp"],
+      "enabled": true
+    }
   }
 }

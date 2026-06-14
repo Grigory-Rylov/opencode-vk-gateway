@@ -13,11 +13,9 @@ import aiohttp
 
 from config import (
     SCRIPT_DIR,
-    MCP_SERVERS,
-    OPENCODE_CONFIG_PATH,
     LLAMA_SERVER_PATH,
     LLAMA_SERVER_HOST,
-  
+    PROVIDER_URL,
     load_config,
 )
 from logging_config import logger
@@ -145,69 +143,6 @@ async def wait_for_llama_server(
     return False
 
 
-def update_opencode_config(alias: str) -> bool:
-    """Обновляет конфиг OpenCode с провайдером и всеми доступными моделями."""
-    try:
-        import config as bot_config
-
-        opencode_config_path = bot_config.OPENCODE_CONFIG_PATH
-        llama_host = bot_config.LLAMA_SERVER_HOST
-        mcp_servers = bot_config.MCP_SERVERS
-
-        # Загружаем все модели из проекта, чтобы opencode знал о них всех
-        project_config = bot_config.load_config(getattr(bot_config.args, 'config', "config.json"))
-        all_models = project_config.get("models", {})
-        # Если models не найден в файле (или это список вместо словаря),
-        # используем глобальный MODELS из config.py как фоллбэк
-        if not isinstance(all_models, dict) or not all_models:
-            all_models = bot_config.MODELS
-
-        # Строим словарь моделей для opencode - ВСЕ модели, не только текущая
-        opencode_models = {}
-        for model_alias, model_info in all_models.items():
-            # Берём реальное имя модели из поля "model" (может отличаться от алиаса)
-            # Внутри provider.llama.cpp.models НЕ добавляем префикс провайдера
-            real_model_name = model_info.get("model", model_alias)
-            opencode_models[model_alias] = {
-                "id": real_model_name,
-            }
-
-        # Для верхнего уровня "model" используем алиас с префиксом провайдера
-        if alias and "/" not in alias:
-            current_model_name = f"llama.cpp/{alias}"
-        else:
-            current_model_name = alias
-
-        opencode_config = {
-            "$schema": "https://opencode.ai/config.json",
-            "model": current_model_name,
-            "provider": {
-                "llama.cpp": {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "name": "llama-server (local)",
-                    "options": {"baseURL": f"{llama_host}/v1"},
-                    "models": opencode_models,
-                }
-            },
-        }
-        # Добавляем permission из конфига бота (если есть)
-        permission = project_config.get("permission")
-        if permission:
-            opencode_config["permission"] = permission
-            logger.info("Added permission rules to opencode config")
-
-        if mcp_servers:
-            opencode_config["mcp"] = mcp_servers
-            logger.info(f"Added {len(mcp_servers)} MCP server(s) to opencode config")
-        logger.info(f"Writing {len(opencode_models)} models to opencode config")
-        with open(opencode_config_path, "w") as f:
-            json.dump(opencode_config, f, indent=2)
-        logger.info(f"Updated opencode config with provider and MCP for {alias}")
-        return True
-    except Exception as e:
-        logger.warning(f"Failed to update opencode config: {e}")
-        return False
-
 
 def save_model_config(alias: str) -> bool:
     """Сохраняет алиас модели в конфиг файл (default_model)."""
@@ -310,12 +245,10 @@ async def do_restart(
     Последовательность:
     1) llama server restart (если LLAMA_SERVER_PATH указан)
     2) Ждём llama ready
-    3) stop opencode (убиваем старый процесс)
-    4) update_opencode_config (пишем новый конфиг)
-    5) start opencode (запускаем с новым конфигом)
-    6) save_model_config (сохраняем в config.json бота)
-    7) reload config (обновляем DEFAULT_MODEL в памяти)
-    8) clean sessions
+    3) restart opencode с новой моделью (CLI аргументы)
+    4) save_model_config (сохраняем в config.json бота)
+    5) reload config (обновляем DEFAULT_MODEL в памяти)
+    6) clean sessions
 
     Args:
         vk_client: Клиент VK для отправки сообщений
@@ -358,30 +291,25 @@ async def do_restart(
         )
         logger.warning(f"Model {alias} did not respond in time")
 
-    # Шаг 3: Убиваем старый opencode процесс
+    # Шаг 3: Перезапускаем opencode с новой моделью (CLI аргументы).
+    # Используем реальное имя модели (model.get("model")) для --model флага
+    real_model_name = model.get("model", alias)
     if opencode_process:
-        await opencode_process.stop()
+        await opencode_process.restart(model=real_model_name, provider_url=PROVIDER_URL)
 
-    # Шаг 4: Пишем новый конфиг opencode (после того как процесс убит — точно прочитает новый)
-    update_opencode_config(alias)
-
-    # Шаг 5: Запускаем новый opencode (прочитает новый конфиг)
-    if opencode_process:
-        await opencode_process.start()
-
-    # Шаг 6: Сохраняем в config.json бота (только алиас)
+    # Шаг 4: Сохраняем в config.json бота (только алиас)
     save_model_config(alias)
 
-    # Шаг 7: Обновляем DEFAULT_MODEL в памяти
+    # Шаг 5: Обновляем DEFAULT_MODEL в памяти
     import importlib
     import config
     importlib.reload(config)
 
-    # Шаг 8: Очищаем сессии текущего пользователя
+    # Шаг 6: Очищаем сессии текущего пользователя
     if session_mgr:
         session_mgr.remove(user_id)
         logger.info(
             f"Cleared session for user {user_id} after model switch to {alias}"
         )
 
-    return model.get("model", alias), None
+    return real_model_name, None

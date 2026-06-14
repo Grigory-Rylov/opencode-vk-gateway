@@ -44,6 +44,18 @@ parser.add_argument(
 parser.add_argument(
     "-d", "--debug", action="store_true", help="Enable debug logging to file"
 )
+parser.add_argument(
+    "--opencode-bin", type=str, default=None,
+    help="Path to opencode binary (lildax). Overrides opencode_bin_path from config."
+)
+parser.add_argument(
+    "--llama-host", type=str, default=None,
+    help="llama-server host URL (e.g. http://192.168.1.212:8081). Overrides llama_server_host from config."
+)
+parser.add_argument(
+    "--model", type=str, default=None,
+    help="Default model ID (e.g. MiniMax-M2.7). Overrides default_model from config."
+)
 
 args = parser.parse_args()
 
@@ -69,9 +81,21 @@ if not VK_TOKEN:
     raise ValueError("VK_TOKEN is required in config file")
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
-OPENCODE_BIN = Path(CONFIG["opencode_bin_path"])
+OPENCODE_BIN = Path(args.opencode_bin or CONFIG["opencode_bin_path"])
 ATTACHES_DIR = SCRIPT_DIR / "attaches"
 OPENCODE_CONFIG_PATH = Path(CONFIG.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()
+
+# Provider URL for CLI --provider-url flag (LLAMA_SERVER_HOST + /v1)
+PROVIDER_URL = (args.llama_host or LLAMA_SERVER_HOST).rstrip("/") + "/v1"
+
+# Model для --model флага, через CLI аргумент или из конфига.
+# Разрешаем алиас в реальное имя модели (через MODELS[alias].model)
+_default_alias = args.model or DEFAULT_MODEL
+_default_model_info = MODELS.get(_default_alias, None) if isinstance(MODELS, dict) else None
+if _default_model_info and isinstance(_default_model_info, dict):
+    CLI_MODEL = _default_model_info.get("model", _default_alias)
+else:
+    CLI_MODEL = _default_alias
 
 
 def getCwd() -> Path:
@@ -126,6 +150,12 @@ def switch_config(config_name: str) -> bool:
     current_module.SUBAGENT_PREFIX = new_config.get("subagent_prefix", "[subagent] ")
     current_module.OPENCODE_BIN = Path(new_config["opencode_bin_path"])
     current_module.OPENCODE_CONFIG_PATH = Path(new_config.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()
+    current_module.PROVIDER_URL = (args.llama_host or new_config.get("llama_server_host", "http://localhost:8081")).rstrip("/") + "/v1"
+    # CLI_MODEL: разрешаем алиас в реальное имя модели
+    _alias = args.model or new_config.get("default_model")
+    _models_dict = new_config.get("models", {})
+    _info = _models_dict.get(_alias, None) if isinstance(_models_dict, dict) else None
+    current_module.CLI_MODEL = _info.get("model", _alias) if isinstance(_info, dict) else _alias
     
     # Обновляем args.config чтобы importlib.reload(config) тоже подхватил
     if hasattr(current_module.args, 'config'):

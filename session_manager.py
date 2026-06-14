@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 from aiohttp import ClientSession
 
-from config import OPENCODE_URL, SESSION_FILE, DEFAULT_MODEL
+from config import OPENCODE_URL, SESSION_FILE, CLI_MODEL
 from logging_config import logger
 from models import model_to_api_format
 
@@ -66,11 +66,12 @@ class SessionManager:
             return self.sessions[user_id]
 
         async with ClientSession() as session:
-            data = model_to_api_format(DEFAULT_MODEL)
-            async with session.post(f"{OPENCODE_URL}/session", json=data) as resp:
+            data = model_to_api_format(CLI_MODEL)
+            async with session.post(f"{OPENCODE_URL}/api/session", json=data) as resp:
                 resp.raise_for_status()
                 resp_data = await resp.json()
-                session_id = resp_data["id"]
+                # API возвращает {data: {id: ...}}
+                session_id = resp_data.get("data", resp_data).get("id")
                 self.sessions[user_id] = session_id
                 if session_id not in self.seen_messages:
                     self.seen_messages[session_id] = set()
@@ -78,7 +79,7 @@ class SessionManager:
                     self.grant_mode[session_id] = False
                 self._save()
                 logger.info(
-                    f"Created OpenCode session {session_id} for user {user_id} with model {DEFAULT_MODEL}"
+                    f"Created OpenCode session {session_id} for user {user_id} with model {CLI_MODEL}"
                 )
                 return session_id
 

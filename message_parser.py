@@ -20,7 +20,7 @@ class ParsedSession:
 
 def parse_session_messages(messages: List[dict]) -> ParsedSession:
     """
-    Парсит историю сообщений из OpenCode API.
+    Парсит историю сообщений из OpenCode API (новый формат v2).
 
     Returns:
         ParsedSession с текстами assistant, рассуждениями и сообщениями пользователя
@@ -30,31 +30,24 @@ def parse_session_messages(messages: List[dict]) -> ParsedSession:
     user_messages: List[str] = []
 
     for msg in messages:
-        info = msg.get("info", {})
-        role = info.get("role", "")
-        msg_id = info.get("id", "")
+        role = msg.get("type", "")
 
-        if role != "assistant" and role != "user":
+        if role == "user":
+            text = msg.get("text", "")
+            if text:
+                user_messages.append(text)
             continue
 
-        msg_parts = []
-        for part in msg.get("parts", []):
-            part_id = part.get("id", "")
+        if role != "assistant":
+            continue
+
+        for part in msg.get("content", []):
             part_type = part.get("type", "")
             part_text = part.get("text")
-
-            msg_parts.append(
-                Part(id=part_id, type=part_type, text=part_text if part_text else None)
-            )
-
-            if role == "assistant":
-                if part_type == "text" and part_text:
-                    assistant_texts.append(part_text)
-                elif part_type == "reasoning" and part_text:
-                    assistant_reasonings.append(part_text)
-            elif role == "user":
-                if part_type == "text" and part_text:
-                    user_messages.append(part_text)
+            if part_type == "text" and part_text:
+                assistant_texts.append(part_text)
+            elif part_type == "reasoning" and part_text:
+                assistant_reasonings.append(part_text)
 
     return ParsedSession(
         assistant_texts=assistant_texts,
@@ -65,51 +58,63 @@ def parse_session_messages(messages: List[dict]) -> ParsedSession:
 
 def get_new_parts(messages: List[dict], seen_part_ids: set) -> List[Part]:
     """
-    Возвращает список новых объектов Part (id, text, type) из сообщений ассистента,
-    которых нет в seen_part_ids.
+    Возвращает новые Part из сообщений ассистента (новый формат v2 API).
 
-    Поддерживаемые типы:
+    Формат API:
+    - msg["type"] — роль ("assistant", "user")
+    - msg["content"] — список частей (для assistant)
+
+    Поддерживаемые типы частей:
         - "text"      -> text = part.get("text", "")
         - "reasoning" -> text = part.get("text", "")
-        - "tool"      -> text = part.get("state", {}).get("output", "")
+        - "tool"      -> text = part.get("tool", "") + " - " + part.get("state", {}).get("status", "")
 
     Args:
         messages: список сообщений от API
-        seen_part_ids: множество id уже обработанных частей
+        seen_part_ids: множество id уже обработанных сообщений/частей
 
     Returns:
-        List[Part] — новые части (только text, reasoning и tool)
+        List[Part] — новые части
     """
     new_parts: List[Part] = []
 
     for msg in messages:
-        if msg.get("info", {}).get("role") != "assistant":
+        if msg.get("type") != "assistant":
             continue
 
-        for part in msg.get("parts", []):
+        msg_id = msg.get("id", "")
+
+        # Трекаем по ID сообщения — если сообщение уже_seen, пропускаем все его части
+        if msg_id and msg_id in seen_part_ids:
+            continue
+
+        for part in msg.get("content", []):
             part_id = part.get("id", "")
-            if not part_id or part_id in seen_part_ids:
+
+            # Генерируем уникальный ID: msg_id:part_id
+            unique_id = f"{msg_id}:{part_id}" if msg_id and part_id else part_id
+            if not unique_id:
+                continue
+
+            # Проверяем и полный уникальный ID, и голый part_id (обратная совместимость)
+            if unique_id in seen_part_ids or part_id in seen_part_ids:
                 continue
 
             part_type = part.get("type", "")
 
-            # Извлекаем текст в зависимости от типа
             if part_type == "text":
                 text = part.get("text", "")
             elif part_type == "reasoning":
                 text = part.get("text", "")
             elif part_type == "tool":
-                # Для тула берём output из state
                 text = (
                     part.get("tool", "")
                     + " - "
                     + part.get("state", {}).get("status", "")
                 )
             else:
-                # Неизвестный тип — пропускаем
-                # print("Unknown type : ", part_type)
                 continue
 
-            new_parts.append(Part(id=part_id, type=part_type, text=text))
+            new_parts.append(Part(id=unique_id, type=part_type, text=text))
 
     return new_parts

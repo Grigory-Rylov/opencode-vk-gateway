@@ -25,7 +25,7 @@ from opencode_process import OpenCodeProcess
 from session_manager import SessionManager
 from vk_longpoll import VKLongPoll
 from vk_client import VKClient
-from llama_server import restart_llama_server, update_opencode_config
+from llama_server import restart_llama_server
 from models import get_current_model
 from config import DEFAULT_MODEL
 import vk_keyboards
@@ -33,15 +33,11 @@ import vk_keyboards
 
 async def send_configs_as_attachments(vk: VKClient, peer_id: int, opencode_process: OpenCodeProcess):
     """Генерирует конфиги и отправляет их как аттачи."""
-    from llama_server import LLAMA_SERVER_HOST
-    from config import OPENCODE_CONFIG_PATH, MODELS
+    from config import OPENCODE_CONFIG_PATH
 
     config_json_path = SCRIPT_DIR / "config.json"
 
-    # Генерируем актуальный opencode конфиг
-    update_opencode_config(DEFAULT_MODEL)
-
-    # Считываем оба конфига
+    # Считываем конфиги
     try:
         project_config_text = config_json_path.read_text(encoding="utf-8")
         config_path = Path(OPENCODE_CONFIG_PATH).expanduser()
@@ -77,7 +73,8 @@ async def send_configs_as_attachments(vk: VKClient, peer_id: int, opencode_proce
     try:
         project_config_path.unlink(missing_ok=True)
         opencode_config_path.unlink(missing_ok=True)
-        tmp_dir.rmdir(missing_ok=True)
+        if tmp_dir.exists():
+            tmp_dir.rmdir()
     except Exception as e:
         logger.warning(f"Failed to cleanup temp configs: {e}")
 
@@ -115,7 +112,7 @@ async def main():
         workdir = Path(session_mgr.session_workdir[first_session_id])
         logger.info(f"Restored workdir from session {first_session_id}: {workdir}")
 
-    opencode_process = OpenCodeProcess(model=bot_config.DEFAULT_MODEL, workdir=workdir)
+    opencode_process = OpenCodeProcess(model=bot_config.CLI_MODEL, provider_url=bot_config.PROVIDER_URL, workdir=workdir)
     logger.info(f"OpenCodeProcess created with workdir={opencode_process.workdir}")
     await opencode_process.start()
 
@@ -130,11 +127,6 @@ async def main():
             )
         except Exception as e:
             logger.warning(f"Failed to send startup message: {e}")
-
-        try:
-            await send_configs_as_attachments(vk, PEER_ID, opencode_process)
-        except Exception as e:
-            logger.warning(f"Failed to send configs: {e}")
 
         poller = VKLongPoll(vk, session_mgr, opencode_process)
         

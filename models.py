@@ -27,4 +27,4 @@ def model_to_api_format(model: str) -> dict:
     if "/" in model:
         providerID, model_id = model.split("/", 1)
         return {"model": {"id": model_id, "providerID": providerID}}
-    return {"model": {"id": model, "providerID": "llama.cpp"}}
+    return {"model": {"id": model, "providerID": "cli"}}

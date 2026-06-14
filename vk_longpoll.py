@@ -470,12 +470,19 @@ class VKLongPoll:
 
         self.seen_permissions[session_id].add(perm_id)
 
-        # Логируем запрос разрешения в debug
-        perm_type = perm.get("permission") or perm.get("action") or "unknown"
-        perm_path = perm.get("path") or perm.get("metadata", {}).get("filepath", "")
+        perm_type = perm.get("action") or "unknown"
+        resources = perm.get("resources", [])
         logger.debug(
-            f"Permission request: type={perm_type}, path={perm_path}, id={perm_id}"
+            f"Permission request: type={perm_type}, resources={resources}, id={perm_id}"
         )
+
+        # Авто-аппрув для /tmp — всегда разрешаем без запроса к пользователю
+        if resources and all(r.startswith("/tmp") for r in resources):
+            logger.info(f"Auto-approving /tmp permission {perm_id}")
+            await self.opencode_client.send_permission_response(
+                perm_session_id, perm_id, "always"
+            )
+            return
 
         # Если включён режим авто-разрешений — отвечаем всегда без запроса
         if self.session_mgr.get_grant_mode(session_id) and self.opencode_client:
@@ -495,90 +502,58 @@ class VKLongPoll:
         logger.info(f"Sent permission request {perm_id} to user {user_id}")
 
     def _format_permission_message(self, perm: dict) -> str:
-        """Форматирует сообщение для запроса разрешения.
+        """Форматирует сообщение для запроса разрешения (новый формат v2 API).
 
-        Поддерживает два формата API:
-        1. Legacy (старый opencode): {permission, metadata: {filepath, parentDir}}
-        2. Crush (новый): {tool_name, action, path} - путь на top-level
-
-        Для external_directory OpenCode не передаёт путь,
-        поэтому используем workdir как fallback.
+        Формат API:
+        - perm["action"] — тип операции (bash, write_file, read_file, etc.)
+        - perm["resources"] — список ресурсов (путей)
+        - perm["metadata"] — дополнительные данные (опционально)
         """
         import json
 
-        # Поддержка обоих форматов API
-        perm_type = perm.get("permission") or perm.get("action") or "unknown"
-        tool_name = perm.get("tool_name", "")
+        perm_type = perm.get("action", "unknown")
+        resources = perm.get("resources", [])
+        path = resources[0] if resources else ""
 
-        # Crush API: путь на top-level
-        path = perm.get("path", "")
-
-        # Legacy API: путь в metadata
+        # Если path пустой, пробуем извлечь из metadata
         if not path:
-            metadata = perm.get("metadata", {})
-            path = (
-                metadata.get("filepath")
-                or metadata.get("file")
-                or metadata.get("filePath")
-                or metadata.get("path")
-                or ""
-            )
+            metadata = perm.get("metadata") or {}
+            path = metadata.get("path", "") or metadata.get("filepath", "")
 
-        # Новый формат opencode API: external_directory с patterns
-        patterns = perm.get("patterns", [])
-        if isinstance(patterns, list) and patterns:
-            path = patterns[0]
-
-        # Legacy API: parent_dir для директорий
-        parent_dir = ""
-        if perm_type == "external_directory":
-            metadata = perm.get("metadata", {})
-            parent_dir = (
-                metadata.get("parentDir")
-                or metadata.get("parent_dir")
-                or metadata.get("directory")
-                or metadata.get("dir")
-                or metadata.get("path")
-                or ""
-            )
-
-        # Fallback: для external_directory используем workdir (рабочий каталог opencode)
-        # OpenCode не передаёт path для external_directory — это всегда workdir
-        if not parent_dir and not path and perm_type == "external_directory":
+        # Fallback для external_directory: используем workdir
+        if not path and perm_type == "external_directory":
             workdir = getattr(self.opencode_process, "workdir", None)
             if workdir:
-                parent_dir = str(workdir)
+                path = str(workdir)
+
+        tool_name = perm_type
 
         # Формируем сообщение в зависимости от типа
         if perm_type == "external_directory":
-            display_path = parent_dir or path
-            if display_path:
-                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории:\n`{display_path}`"
+            if path:
+                return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории:\n`{path}`"
             else:
                 return f"⚠️ **Запрос разрешения**\n\nТип: `{perm_type}`\n\nПрограмма хочет получить доступ к директории.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
         elif perm_type in ("write_file", "edit", "multi_edit"):
             if path:
-                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет записать файл:\n`{path}`"
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name}`\n\nПрограмма хочет записать файл:\n`{path}`"
             else:
-                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет записать файл.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name}`\n\nПрограмма хочет записать файл.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
         elif perm_type in ("read_file", "view", "read"):
             if path:
-                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет прочитать файл:\n`{path}`"
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name}`\n\nПрограмма хочет прочитать файл:\n`{path}`"
             else:
-                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nПрограмма хочет прочитать файл.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
-        elif perm_type == "bash" or (tool_name == "bash"):
-            # Bash permissions - показываем команду из params
-            params = perm.get("params", {})
+                return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name}`\n\nПрограмма хочет прочитать файл.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
+        elif perm_type == "bash" or tool_name == "bash":
+            params = perm.get("metadata") or {}
             command = params.get("command", params.get("cmd", "")) if isinstance(params, dict) else ""
-            bash_path = path or params.get("working_directory", "") if isinstance(params, dict) else ""
-            display = command or bash_path
+            display = command or path
             if display:
                 return f"⚠️ **Запрос разрешения**\n\nИнструмент: `bash`\n\nПрограмма хочет выполнить команду:\n`{display}`"
             else:
                 return f"⚠️ **Запрос разрешения**\n\nИнструмент: `bash`\n\nПрограмма хочет выполнить команду.\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
         else:
-            # Для неизвестных типов показываем полную информацию
-            return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name or perm_type}`\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
+            return f"⚠️ **Запрос разрешения**\n\nИнструмент: `{tool_name}`\n\nДанные: `{json.dumps(perm, ensure_ascii=False)}`"
 
     def _create_permission_keyboard(self) -> dict:
         """Создает клавиатуру для ответа на разрешение"""
@@ -601,6 +576,16 @@ class VKLongPoll:
 
         self.seen_permissions[child_id].add(perm_id)
 
+        resources = perm.get("resources", [])
+
+        # Авто-аппрув для /tmp
+        if resources and all(r.startswith("/tmp") for r in resources):
+            logger.info(f"Auto-approving /tmp child permission {perm_id}")
+            await self.opencode_client.send_permission_response(
+                perm_session_id, perm_id, "always"
+            )
+            return
+
         if self.session_mgr.get_grant_mode(parent_id) and self.opencode_client:
             logger.debug(f"Auto-grant (parent): approving child permission {perm_id}")
             await self.opencode_client.send_permission_response(
@@ -614,8 +599,8 @@ class VKLongPoll:
                 child_title = ch_info.get("title", child_id[:12])
                 break
 
-        perm_type = perm.get("permission") or perm.get("action") or "unknown"
-        perm_path = perm.get("path") or perm.get("metadata", {}).get("filepath", "")
+        perm_type = perm.get("action") or "unknown"
+        perm_path = resources[0] if resources else ""
         msg = (
             f"{SUBAGENT_PREFIX}⚠️ **Запрос разрешения (subagent)**\n\n"
             f"Subagent: {child_title}\n"
@@ -699,10 +684,10 @@ class VKLongPoll:
         logger.info(f"Found new question {q_id} for session {session_id}")
 
         actual_question = q.get("questions", [{}])[0] if q.get("questions") else q
-        await self._show_question(user_id, actual_question, original_id=q_id)
+        await self._show_question(user_id, actual_question, original_id=q_id, session_id=session_id)
 
     async def _show_question(
-        self, user_id: int, question_data: dict, original_id: str = None
+        self, user_id: int, question_data: dict, original_id: str = None, session_id: str = None
     ):
         """Показывает вопрос пользователю с клавиатурой"""
         question_id = (
@@ -714,7 +699,7 @@ class VKLongPoll:
 
         header, question_text, options = self._extract_question_data(question_data)
 
-        self.waiting_for_answer[user_id] = question_id
+        self.waiting_for_answer[user_id] = (session_id, question_id)
 
         try:
             keyboard = vk_keyboards.get_question_keyboard(options)
@@ -739,16 +724,18 @@ class VKLongPoll:
             or ""
         )
 
-        if not question_text and "metadata" in question_data:
+        if not question_text:
+            metadata = question_data.get("metadata") or {}
             question_text = (
-                question_data["metadata"].get("question")
-                or question_data["metadata"].get("text")
+                metadata.get("question")
+                or metadata.get("text")
                 or ""
             )
 
         options = question_data.get("options", [])
-        if not options and "metadata" in question_data:
-            options = question_data["metadata"].get("options", [])
+        if not options:
+            metadata = question_data.get("metadata") or {}
+            options = metadata.get("options", [])
         if not options and "choices" in question_data:
             options = question_data["choices"]
 
@@ -830,10 +817,10 @@ class VKLongPoll:
         logger.info(f"Sent child question {q_id} for subagent {child_title}")
 
     async def _handle_question_answer(
-        self, user_id: int, question_id: str, answer: str
+        self, user_id: int, question_id: str, answer: str, session_id: str = None
     ):
         """Обрабатывает ответ пользователя на вопрос"""
-        success = await self.opencode_client.send_question_answer(question_id, answer)
+        success = await self.opencode_client.send_question_answer(session_id, question_id, answer)
         if success:
             await self.vk.send_message(
                 user_id,
@@ -977,8 +964,8 @@ class VKLongPoll:
         # Обработка ответов на вопросы (родительские и дочерние)
         # Сначала проверяем parent (int ключ)
         if user_id in self.waiting_for_answer:
-            question_id = self.waiting_for_answer.pop(user_id)
-            await self._handle_question_answer(user_id, question_id, text)
+            session_id, question_id = self.waiting_for_answer.pop(user_id)
+            await self._handle_question_answer(user_id, question_id, text, session_id)
             return
 
         # Проверяем child вопросы (кортеж ключ (peer_id, child_id))
@@ -1434,14 +1421,9 @@ class VKLongPoll:
         self.opencode_client = OpenCodeClient()
         await self.opencode_client.__aenter__()
 
-        # Обновляем конфиг opencode с новыми моделями
-        from llama_server import update_opencode_config
-
-        update_opencode_config(config.DEFAULT_MODEL)
-
-        # Рестартуем opencode serve
+        # Рестартуем opencode serve с новой моделью (CLI аргументы)
         try:
-            await self.opencode_process.restart()
+            await self.opencode_process.restart(model=config.CLI_MODEL, provider_url=config.PROVIDER_URL)
         except Exception as e:
             logger.warning(f"Failed to restart opencode after config switch: {e}")
 
