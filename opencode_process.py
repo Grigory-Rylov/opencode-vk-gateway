@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiohttp
 
-from config import OPENCODE_BIN
+from config import OPENCODE_BIN, OPENCODE_PORT
 from logging_config import logger
 
 
@@ -17,7 +17,7 @@ class OpenCodeProcess:
     def __init__(self, model: str = None, workdir: Path = None):
         self.logger = logger
         self.process = None
-        self.opencode_port = 4097
+        self.opencode_port = OPENCODE_PORT
         self.model = model
         self.workdir = workdir or Path.cwd()
         self.logger.debug(
@@ -66,7 +66,7 @@ class OpenCodeProcess:
                     raise RuntimeError(f"opencode exited early: {stderr_str}")
                 try:
                     async with aiohttp.ClientSession() as sess:
-                        async with sess.get("http://127.0.0.1:4097/", timeout=1) as resp:
+                        async with sess.get(f"http://127.0.0.1:{self.opencode_port}/", timeout=1) as resp:
                             if resp.status == 200:
                                 self.logger.info("OpenCode server is ready")
                                 return

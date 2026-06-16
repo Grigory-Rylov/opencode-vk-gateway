@@ -4,6 +4,7 @@
 import argparse
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 DEFAULT_CONFIG = {
@@ -53,6 +54,7 @@ CONFIG = load_config(args.config)
 # ---------- Глобальные константы из конфигурации ----------
 VK_TOKEN = CONFIG["vk_token"]
 OPENCODE_URL = CONFIG["opencode_url"]
+OPENCODE_PORT = urlparse(OPENCODE_URL).port or 4096
 SESSION_FILE = Path(CONFIG["session_file"])
 VK_API_VERSION = CONFIG["vk_api_version"]
 LONGPOLL_WAIT = CONFIG["longpoll_wait"]
@@ -113,6 +115,7 @@ def switch_config(config_name: str) -> bool:
     current_module.CONFIG = new_config
     current_module.VK_TOKEN = new_config["vk_token"]
     current_module.OPENCODE_URL = new_config["opencode_url"]
+    current_module.OPENCODE_PORT = urlparse(new_config["opencode_url"]).port or 4096
     current_module.SESSION_FILE = Path(new_config["session_file"])
     current_module.VK_API_VERSION = new_config["vk_api_version"]
     current_module.LONGPOLL_WAIT = new_config["longpoll_wait"]
