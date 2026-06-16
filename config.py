@@ -64,6 +64,8 @@ MODELS = CONFIG.get("models", {})
 DEFAULT_MODEL = CONFIG.get("default_model")
 LLAMA_SERVER_PATH = CONFIG.get("llama_server_path", None)
 LLAMA_SERVER_HOST = CONFIG.get("llama_server_host", "http://localhost:8081")
+PROVIDER_URL = LLAMA_SERVER_HOST
+CLI_MODEL = DEFAULT_MODEL
 MCP_SERVERS = CONFIG.get("mcp_servers", {})
 SUBAGENT_PREFIX = CONFIG.get("subagent_prefix", "[subagent] ")
 
@@ -128,6 +130,8 @@ def switch_config(config_name: str) -> bool:
     current_module.MCP_SERVERS = new_config.get("mcp_servers", {})
     current_module.SUBAGENT_PREFIX = new_config.get("subagent_prefix", "[subagent] ")
     current_module.OPENCODE_BIN = Path(new_config["opencode_bin_path"])
+    current_module.PROVIDER_URL = current_module.LLAMA_SERVER_HOST
+    current_module.CLI_MODEL = current_module.DEFAULT_MODEL
     current_module.OPENCODE_CONFIG_PATH = Path(new_config.get("opencode_config_path", "~/.config/opencode/opencode.json")).expanduser()
     
     # Обновляем args.config чтобы importlib.reload(config) тоже подхватил
